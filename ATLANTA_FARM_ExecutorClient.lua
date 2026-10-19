@@ -1,45 +1,30 @@
--- ATLANTA FARM V1.2 — клиентское меню для исполнения в контексте клиента Roblox.
--- Требует ATLANTA_FARM_Server, установленный в ВАШЕЙ игре.
--- Сам по себе этот файл не создает сервер, валюту и права администратора.
--- Никогда не запускайте чужие непроверенные loadstring-скрипты.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+local TeleportService = game:GetService("TeleportService")
+local TextChatService = game:GetService("TextChatService")
 local player = Players.LocalPlayer
 if not player then warn("ATLANTA FARM: client-only script"); return end
 local pg = player:WaitForChild("PlayerGui")
-if pg:FindFirstChild("ATLANTA_FARM_V12") then
-    warn("ATLANTA FARM: menu already launched — use the A button")
+-- Повторный запуск только открывает прежнее окно.
+local old = pg:FindFirstChild("ATLANTA_FARM_V13")
+if old then
+    local window = old:FindFirstChild("MainWindow")
+    if window then window.Visible = true end
     return
+end
+-- Удаляем только старые уведомления и устаревший GUI ATLANTA FARM.
+for _, name in ipairs({"AtlantaFarmNoServerNotice", "ATLANTA_FARM_V12"}) do
+    local object = pg:FindFirstChild(name)
+    if object then object:Destroy() end
 end
 local remote = ReplicatedStorage:FindFirstChild("AtlantaFarmRemote")
-    or ReplicatedStorage:WaitForChild("AtlantaFarmRemote", 8)
-if not remote or not remote:IsA("RemoteEvent") then
-    warn("ATLANTA FARM: SERVER NOT INSTALLED in this place. Set up ATLANTA_FARM_Server in your own Roblox Studio experience first; an executor cannot add server scripts.")
-    local hint = Instance.new("ScreenGui")
-    hint.Name = "AtlantaFarmNoServerNotice"
-    hint.ResetOnSpawn = false
-    hint.Parent = pg
-    local t = Instance.new("TextLabel")
-    t.Size = UDim2.fromOffset(330, 85)
-    t.AnchorPoint = Vector2.new(0.5, 0)
-    t.Position = UDim2.new(0.5, 0, 0, 64)
-    t.BackgroundColor3 = Color3.fromRGB(22, 27, 41)
-    t.TextColor3 = Color3.fromRGB(240, 245, 255)
-    t.Font = Enum.Font.GothamMedium
-    t.TextSize = 13
-    t.TextWrapped = true
-    t.Text = "ATLANTA FARM: серверная часть не установлена.\nПодключи ATLANTA_FARM_Server в своей игре."
-    t.Parent = hint
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 12)
-    c.Parent = t
-    task.delay(8, function() if hint then hint:Destroy() end end)
-    return
-end
+if remote and not remote:IsA("RemoteEvent") then remote = nil end
+local serverConnected = false
 
 local BG = Color3.fromRGB(14, 17, 26)
 local CARD = Color3.fromRGB(27, 33, 47)
@@ -49,8 +34,192 @@ local LIGHT = Color3.fromRGB(240, 245, 255)
 local MUTED = Color3.fromRGB(149, 165, 187)
 local GREEN = Color3.fromRGB(97, 221, 159)
 local WARN = Color3.fromRGB(255, 184, 91)
-local state = {active=false,speed=16,fly=5,autoReset=true,autoRejoin=false,coins=0,bag=0,bagLimit=50,resets=0,elapsed=0,perHour=0,status="Ожидаем сервер",role="Unknown",roleActions=false,standalone=true}
-local authorized = false
+local state = {active=false,speed=16,fly=5,autoReset=false,autoRejoin=false,coins=0,bag=0,bagLimit="?",resets=0,elapsed=0,perHour=0,status="Локальный режим · GUI готов",role="Unknown",roleActions=false,standalone=true}
+local authorized = true
+local refresh
+local startedAt = os.clock()
+local lastSeenCoinAt = os.clock()
+local visited = setmetatable({}, {__mode="k"})
+local candidates = setmetatable({}, {__mode="k"})
+local runningJob = 0
+
+local function isCoin(part)
+    if not part or not part:IsA("BasePart") then return false end
+    if CollectionService:HasTag(part, "AtlantaCoin") or part:GetAttribute("AtlantaCoin") == true then return true end
+    local function named(s)
+        s = string.lower(s)
+        return s == "coin" or s == "candy" or s:find("coin", 1, true) ~= nil
+            or s:find("candy", 1, true) ~= nil or s:find("конфет", 1, true) ~= nil
+            or s:find("монет", 1, true) ~= nil
+    end
+    if named(part.Name) then return true end
+    local par = part.Parent
+    if par and par:IsA("Model") and named(par.Name) then return true end
+    return false
+end
+local function cacheCoin(obj)
+    if isCoin(obj) then candidates[obj] = true end
+end
+for _, obj in ipairs(Workspace:GetDescendants()) do cacheCoin(obj) end
+Workspace.DescendantAdded:Connect(cacheCoin)
+CollectionService:GetInstanceAddedSignal("AtlantaCoin"):Connect(cacheCoin)
+
+local function liveCharacter()
+    local char = player.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if hum and hum.Health > 0 and root then return char, hum, root end
+end
+local function applyWalkSpeed()
+    local _, hum = liveCharacter()
+    if hum then hum.WalkSpeed = state.speed end
+end
+player.CharacterAdded:Connect(function()
+    task.wait(0.7)
+    if not serverConnected then applyWalkSpeed() end
+end)
+
+local function visibleRole(plr)
+    local char = plr.Character
+    local role = plr:GetAttribute("AtlantaRole") or plr:GetAttribute("CurrentRole")
+        or plr:GetAttribute("Role") or (char and (char:GetAttribute("AtlantaRole") or char:GetAttribute("Role")))
+    if type(role) == "string" then return string.lower(role) end
+    return ""
+end
+local function findDanger()
+    if visibleRole(player) == "murderer" then return nil end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player and visibleRole(plr) == "murderer" then
+            local root = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            if root then return root.Position end
+        end
+    end
+end
+local function closestCoin(root)
+    local best, bestScore = nil, math.huge
+    local danger = findDanger()
+    for part in pairs(candidates) do
+        if part and part.Parent and part:IsDescendantOf(Workspace) and isCoin(part)
+            and os.clock() - (visited[part] or -100) > 18 then
+            local distance = (part.Position-root.Position).Magnitude
+            if distance < 600 then
+                local bad = danger and (part.Position-danger).Magnitude < 30
+                if not bad and distance < bestScore then best, bestScore = part, distance end
+            end
+        end
+    end
+    return best, danger
+end
+
+local function moveTo(root, point, duration, job)
+    if job ~= runningJob or not state.active or not root.Parent then return false end
+    local look = root.CFrame.LookVector
+    local forward = Vector3.new(look.X,0,look.Z)
+    if forward.Magnitude < 0.01 then forward = Vector3.new(0,0,-1) else forward = forward.Unit end
+    local goal = CFrame.new(point, point + forward)
+    local tw = TweenService:Create(root, TweenInfo.new(math.clamp(duration,0.12,4),Enum.EasingStyle.Linear), {CFrame=goal})
+    tw:Play()
+    while tw.PlaybackState == Enum.PlaybackState.Playing do
+        if job ~= runningJob or not state.active or not root.Parent then tw:Cancel();return false end
+        task.wait(0.035)
+    end
+    return tw.PlaybackState == Enum.PlaybackState.Completed
+end
+local function groundBelow(char, target)
+    local p = RaycastParams.new()
+    p.FilterType = Enum.RaycastFilterType.Exclude
+    p.FilterDescendantsInstances = {char}
+    local ray = Workspace:Raycast(target + Vector3.new(0,15,0), Vector3.new(0,-80,0), p)
+    return ray and ray.Position.Y + 3 or target.Y
+end
+local function visitCoin(part, job)
+    local char, hum, root = liveCharacter()
+    if not char or not part or not part.Parent then return false end
+    local target = part.Position
+    local flyRate = 14 + state.fly*10 -- client-local units/second
+    local original = root.Position
+    local upY = math.max(original.Y + 3, target.Y + 3)
+    local cruise = Vector3.new(original.X, upY, original.Z)
+    local above = Vector3.new(target.X, upY, target.Z)
+    local function go(point)
+        local dist = (root.Position-point).Magnitude
+        return moveTo(root, point, dist/flyRate, job)
+    end
+    hum:ChangeState(Enum.HumanoidStateType.Physics)
+    local ok = go(cruise) and go(above)
+    if ok and part.Parent then
+        ok = go(target + Vector3.new(0,1.1,0))
+    end
+    if ok then task.wait(0.12) end
+    -- Сначала пробуем приземлиться; возвращаем управление персонажем в любом случае.
+    if root.Parent and job == runningJob and state.active then
+        go(Vector3.new(root.Position.X, groundBelow(char,target), root.Position.Z))
+    end
+    if hum.Parent then hum:ChangeState(Enum.HumanoidStateType.GettingUp) end
+    if ok then
+        visited[part] = os.clock()
+        lastSeenCoinAt = os.clock()
+        -- В локальном режиме учитываем ПОСЕЩЕНИЯ, не начисленную сервером валюту.
+        state.coins += 1
+        state.status = "Посещение монеты #" .. tostring(state.coins)
+    end
+    return ok
+end
+local function runLocalFarm(job)
+    while state.active and job == runningJob and not serverConnected do
+        local _, hum, root = liveCharacter()
+        if not root then
+            state.status = "Ожидание появления персонажа"
+            task.wait(0.7)
+        else
+            local part, danger = closestCoin(root)
+            if part then
+                state.status = danger and "Ищу монеты вдали от Murderer" or "Лечу к монете"
+                visitCoin(part, job)
+                task.wait(0.15)
+            else
+                state.status = danger and "Безопасных монет не найдено" or "Монеты не найдены в Workspace"
+                task.wait(1.1)
+            end
+        end
+        if state.autoRejoin and os.clock()-lastSeenCoinAt > 180 and not RunService:IsStudio() then
+            state.status = "Пробую переподключиться"
+            pcall(function() TeleportService:Teleport(game.PlaceId, player) end)
+            lastSeenCoinAt = os.clock()
+        end
+    end
+end
+local function send(action, value)
+    if serverConnected and remote then
+        remote:FireServer(action, value)
+        return
+    end
+    if action == "ToggleFarm" then
+        state.active = not state.active
+        runningJob += 1
+        local job = runningJob
+        if state.active then
+            state.status = "Локальный поиск монет"
+            task.spawn(runLocalFarm,job)
+        else
+            state.status = "Фарм остановлен"
+            local _,hum = liveCharacter()
+            if hum then hum:ChangeState(Enum.HumanoidStateType.GettingUp) end
+        end
+    elseif action == "Speed" then
+        state.speed = math.clamp(tonumber(value) or 16, 16, 25)
+        applyWalkSpeed()
+    elseif action == "Fly" then
+        state.fly = math.clamp(tonumber(value) or 5, 1, 10)
+    elseif action == "AutoReset" then
+        state.autoReset = not not value
+        state.status = "Auto Reset: нужен счётчик мешка от сервера игры"
+    elseif action == "AutoRejoin" then
+        state.autoRejoin = not not value
+    end
+    if refresh then refresh() end
+end
 
 local function ui(className, props, parent)
     local inst = Instance.new(className)
@@ -88,11 +257,11 @@ local function actionBtn(parent, txt, width)
     return b
 end
 
-local gui=ui("ScreenGui",{Name="ATLANTA_FARM_V12",ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=15},player:WaitForChild("PlayerGui"))
+local gui=ui("ScreenGui",{Name="ATLANTA_FARM_V13",ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=15},player:WaitForChild("PlayerGui"))
 local opener=ui("TextButton",{
     Name="AtlantaLauncher",Text="A",Font=Enum.Font.GothamBlack,TextSize=23,TextColor3=LIGHT,
     BackgroundColor3=Color3.fromRGB(33,61,98),Size=UDim2.fromOffset(54,54),
-    Position=UDim2.new(0,18,0.52,0),BorderSizePixel=0,Visible=false,AutoButtonColor=false,
+    Position=UDim2.new(0,18,0.52,0),BorderSizePixel=0,Visible=true,AutoButtonColor=false,
 },gui)
 corner(opener,19)
 stroke(opener,BLUE,0.2)
@@ -108,7 +277,7 @@ local scale=ui("UIScale",{Scale=1},panel)
 
 local top=ui("Frame",{BackgroundColor3=BG,Size=UDim2.new(1,0,0,67),BorderSizePixel=0},panel)
 label(top,"ATLANTA FARM",11,24,19,LIGHT,Enum.Font.GothamBlack)
-label(top,"TG: @AtlantaRobuxShop   •   V1.2",38,15,11,BLUE,Enum.Font.GothamMedium)
+label(top,"TG: @AtlantaRobuxShop   •   V1.3",38,15,11,BLUE,Enum.Font.GothamMedium)
 local close=actionBtn(top,"—",34)
 close.Position=UDim2.new(1,-44,0,19)
 
@@ -169,12 +338,14 @@ rejoinBtn.Position=UDim2.new(1,-74,0,10)
 local stats=box(scroll,161)
 label(stats,"ANALYTICS",8,20,13,LIGHT,Enum.Font.GothamBold)
 local statTexts={}
+local visitTitle
 local statsInfo={{"Collected","coins"},{"Coins / Hour","perHour"},{"Bag","bag"},{"Resets","resets"}}
 for i,item in ipairs(statsInfo) do
     local col=(i-1)%2;local row=math.floor((i-1)/2)
     local cell=ui("Frame",{BackgroundColor3=CARD2,Position=UDim2.new(col*0.5,11+col*0,0,35+row*59),Size=UDim2.new(0.5,-17,0,52),BorderSizePixel=0},stats)
     corner(cell,9)
-    label(cell,item[1],5,16,10,MUTED)
+    local titleLabel = label(cell,item[1],5,16,10,MUTED)
+    if item[2] == "coins" then visitTitle = titleLabel end
     statTexts[item[2]]=label(cell,"0",24,23,17,LIGHT,Enum.Font.GothamBold)
 end
 local timerRow=box(scroll,52)
@@ -184,12 +355,12 @@ local roleRow=box(scroll,52)
 label(roleRow,"CURRENT ROLE",5,18,10,MUTED,Enum.Font.GothamBold)
 local roleText=label(roleRow,"Unknown",23,21,13,LIGHT,Enum.Font.GothamBold)
 local studioBox
-if RunService:IsStudio() then
+if RunService:IsStudio() and remote then
     studioBox=box(scroll,54)
     label(studioBox,"Тестовый сбор (Studio)",6,17,11,LIGHT)
     local spawnBtn=actionBtn(studioBox,"55 COINS",94)
     spawnBtn.Position=UDim2.new(1,-106,0,12)
-    spawnBtn.MouseButton1Click:Connect(function() remote:FireServer("SpawnTest") end)
+    spawnBtn.MouseButton1Click:Connect(function() send("SpawnTest") end)
 end
 local statusBox=box(scroll,62)
 label(statusBox,"STATUS",5,17,10,BLUE,Enum.Font.GothamBold)
@@ -210,13 +381,14 @@ if Workspace.CurrentCamera then Workspace.CurrentCamera:GetPropertyChangedSignal
 recomputeScale()
 
 local function show(open)
-    if not authorized then return end
     isOpen=open
     if open then
         panel.Visible=true
         scale.Scale=math.max(0.2,scale.Scale*0.89)
         panel.BackgroundTransparency=0.6
-        local target=math.clamp(math.min((Workspace.CurrentCamera.ViewportSize.X-20)/360,(Workspace.CurrentCamera.ViewportSize.Y-35)/590),0.62,1)
+        local camera = Workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.new(420, 700)
+        local target=math.clamp(math.min((viewport.X-20)/360,(viewport.Y-35)/590),0.62,1)
         animate(scale,0.25,{Scale=target})
         animate(panel,0.22,{BackgroundTransparency=0})
     else
@@ -257,15 +429,15 @@ local function sliderEvents(bar,min,max,action,fill,knob,txt,suffix)
     UserInputService.InputEnded:Connect(function(input)
         if isDragging and (input.UserInputType==Enum.UserInputType.MouseButton1 or (input.UserInputType==Enum.UserInputType.Touch and input==activeInput)) then
             isDragging=false
-            remote:FireServer(action,current)
+            send(action,current)
         end
     end)
 end
 sliderEvents(speedBar,16,25,"Speed",speedFill,speedKnob,speedValue,"")
 sliderEvents(flyBar,1,10,"Fly",flyFill,flyKnob,flyValue," / 10")
-farmButton.MouseButton1Click:Connect(function() remote:FireServer("ToggleFarm") end)
-resetBtn.MouseButton1Click:Connect(function() remote:FireServer("AutoReset",not state.autoReset) end)
-rejoinBtn.MouseButton1Click:Connect(function() remote:FireServer("AutoRejoin",not state.autoRejoin) end)
+farmButton.MouseButton1Click:Connect(function() send("ToggleFarm") end)
+resetBtn.MouseButton1Click:Connect(function() send("AutoReset",not state.autoReset) end)
+rejoinBtn.MouseButton1Click:Connect(function() send("AutoRejoin",not state.autoRejoin) end)
 
 -- Перетаскивание окна (ПК и тач).
 local moving=false;local firstPoint;local firstPosition
@@ -289,7 +461,7 @@ local function timeFormat(t)
     t=math.floor(t or 0)
     return string.format("%02d:%02d:%02d",math.floor(t/3600),math.floor(t/60)%60,t%60)
 end
-local function refresh()
+refresh = function()
     farmButton.Text=state.active and "ON" or "OFF"
     farmButton.TextColor3=state.active and GREEN or LIGHT
     resetBtn.Text=state.autoReset and "ON" or "OFF"
@@ -300,20 +472,33 @@ local function refresh()
     speedValue.TextColor3=(state.speed>20) and WARN or BLUE
     speedWarning.Visible=state.speed>20
     updateSlider(flyBar,flyFill,flyKnob,flyValue,state.fly,1,10," / 10")
+    if visitTitle then visitTitle.Text = serverConnected and "Collected" or "Visits (not coins)" end
+    -- В локальном режиме это скорость ПОСЕЩЕНИЙ, а не реальная игровая валюта.
+    if statsInfo[2] and statTexts.perHour then
+        local hourTitle = statTexts.perHour.Parent:FindFirstChildWhichIsA("TextLabel")
+        if hourTitle and hourTitle ~= statTexts.perHour then
+            hourTitle.Text = serverConnected and "Coins / Hour" or "Visits / Hour"
+        end
+    end
     statTexts.coins.Text=tostring(state.coins)
     statTexts.perHour.Text=tostring(state.perHour)
     statTexts.bag.Text=string.format("%s/%s",tostring(state.bag),tostring(state.bagLimit))
     statTexts.resets.Text=tostring(state.resets)
     timeText.Text=timeFormat(state.elapsed)
     statusLabel.Text=tostring(state.status)
-    roleText.Text=tostring(state.role)..(state.roleActions and "  •  Actions ON" or "  •  Actions OFF")
-    footer.Text=state.standalone and "DEMO COINS ≠ MM2 balance  •  @AtlantaRobuxShop" or "Made by @AtlantaRobuxShop  •  /farm"
+    roleText.Text=serverConnected and (tostring(state.role)..(state.roleActions and "  •  Actions ON" or "  •  Actions OFF")) or tostring(player:GetAttribute("AtlantaRole") or player:GetAttribute("CurrentRole") or player:GetAttribute("Role") or "Unknown")
+    footer.Text=serverConnected and "Server mode  •  @AtlantaRobuxShop" or "Local mode · visits ≠ balance  •  @AtlantaRobuxShop"
 end
-remote.OnClientEvent:Connect(function(event,payload)
+if remote then remote.OnClientEvent:Connect(function(event,payload)
     if event=="Authorized" then
-        authorized=true;opener.Visible=true
+        serverConnected=true
+        state.active=false
+        runningJob += 1
+        state.status="Сервер ATLANTA FARM подключён"
+        opener.Visible=true
     elseif event=="Denied" then
-        authorized=false;opener.Visible=false;panel.Visible=false
+        serverConnected=false
+        state.status="Локальный режим: сервер отклонил доступ"
     elseif event=="ToggleUI" then
         if authorized then show(not isOpen) end
     elseif event=="State" and type(payload)=="table" then
@@ -321,5 +506,39 @@ remote.OnClientEvent:Connect(function(event,payload)
         refresh()
     end
 end)
-remote:FireServer("Hello")
+remote:FireServer("Hello") end
+
+-- Открываем окно немедленно: не ждём наличие сервера или авторизацию.
 refresh()
+show(true)
+
+-- Простейшие удобные способы открыть окно заново.
+UserInputService.InputBegan:Connect(function(input, processed)
+    if not processed and input.KeyCode == Enum.KeyCode.RightShift then show(not isOpen) end
+end)
+player.Chatted:Connect(function(message)
+    if string.lower(message) == "/farm" then show(not isOpen) end
+end)
+-- Новый чат Roblox также поддерживает отдельную слеш-команду.
+pcall(function()
+    local cmd = Instance.new("TextChatCommand")
+    cmd.Name = "AtlantaFarmCommand"
+    cmd.PrimaryAlias = "/farm"
+    cmd.Parent = TextChatService:WaitForChild("TextChatCommands", 2) or TextChatService
+    cmd.Triggered:Connect(function() show(not isOpen) end)
+end)
+task.spawn(function()
+    while gui.Parent do
+        task.wait(1)
+        if not serverConnected then
+            state.elapsed = os.clock()-startedAt
+            state.perHour = (state.elapsed > 0) and math.floor(state.coins/state.elapsed*3600 + 0.5) or 0
+            -- Авто сброс мешка не пытается угадать ёмкость или ломать чужую механику.
+            local bag = player:GetAttribute("AtlantaBag")
+            local limit = player:GetAttribute("AtlantaBagLimit")
+            if type(bag)=="number" then state.bag=bag end
+            if type(limit)=="number" then state.bagLimit=limit end
+            refresh()
+        end
+    end
+end)
