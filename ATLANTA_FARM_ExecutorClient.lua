@@ -1,8 +1,9 @@
-HALLOWEN MM2 V1.8 • Optimized Candy Farm Edition • @AtlantaRobuxShop
+-- HALLOWEN MM2 V1.9 • Stable Startup Edition • @AtlantaRobuxShop
 -- Standalone CLIENT UI for testing within a Roblox experience.
 -- Works only to the extent permitted by the place / local runtime.
 -- Does not claim server-confirmed coin collection, universal End Round or auto-injection after a crash.
 
+local __launchOk, __launchError = xpcall(function()
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
@@ -15,14 +16,12 @@ local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
 local VirtualUser = game:GetService("VirtualUser")
 local player = Players.LocalPlayer
-if not player then warn("HALLOWEN MM2 V1.8 must run on the client") return end
+if not player then warn("HALLOWEN MM2 V1.9 must run on the client") return end
 local pg = player:WaitForChild("PlayerGui")
-local guiName = "HALLOWEN_MM2_V18"
+local guiName = "HALLOWEN_MM2_V19"
 local current = pg:FindFirstChild(guiName)
 if current then
-    local panel = current:FindFirstChild("MainWindow")
-    if panel then panel.Visible = true end
-    return
+    pcall(function() current:Destroy() end)
 end
 for _, oldName in ipairs({"HALLOWEN_MM2_V18","ATLANTA_FARM_V17","ATLANTA_FARM_V16","ATLANTA_FARM_V15","ATLANTA_FARM_V14","ATLANTA_FARM_V13","ATLANTA_FARM_V12","AtlantaFarmNoServerNotice"}) do
     local old = pg:FindFirstChild(oldName)
@@ -78,8 +77,7 @@ local function charParts()
     return nil
 end
 local function applySpeed()
-    local _,hum = charParts()
-    if hum then hum.WalkSpeed = state.speed end
+    -- Flight speed is controlled by state.speed; do not alter regular Roblox running.
 end
 local function isCoin(part)
     if not part or not part:IsA("BasePart") then return false end
@@ -101,9 +99,18 @@ end
 local function cacheCoin(part)
     if isCoin(part) then cachedCoins[part] = true end
 end
-for _,obj in ipairs(Workspace:GetDescendants()) do cacheCoin(obj) end
 bind(Workspace.DescendantAdded, cacheCoin)
 bind(CollectionService:GetInstanceAddedSignal("AtlantaCoin"),cacheCoin)
+-- Populate coin cache off the UI startup path; yield periodically on mobile.
+task.spawn(function()
+    local ok, items = pcall(function() return Workspace:GetDescendants() end)
+    if not ok or not items then return end
+    for i, obj in ipairs(items) do
+        if not alive then return end
+        if obj and obj.Parent then cacheCoin(obj) end
+        if i % 250 == 0 then task.wait() end
+    end
+end)
 
 local function visibleRole(plr)
     local char=plr.Character
@@ -123,7 +130,12 @@ local function visibleKnife(plr)
     end
     return false
 end
+local cachedThreats={}
+local lastThreatScan=-math.huge
 local function murderLocations()
+    local now=os.clock()
+    if now-lastThreatScan < 0.4 then return cachedThreats end
+    lastThreatScan=now
     local places={}
     for _,plr in ipairs(Players:GetPlayers()) do
         if plr~=player and (visibleRole(plr)=="murderer" or visibleRole(plr)=="murder" or visibleKnife(plr)) then
@@ -133,6 +145,7 @@ local function murderLocations()
             if root and hum and hum.Health>0 then table.insert(places,root.Position) end
         end
     end
+    cachedThreats=places
     return places
 end
 local function unsafeTarget(pos, points)
@@ -251,6 +264,7 @@ local function glideToCoin(part,job)
         local goal=part.Position+Vector3.new(0,0.7,0)
         local oldAutoRotate=hum.AutoRotate
         hum.AutoRotate=false
+        updateNoclip()
         state.status="Air Walk → "..(isCandy(part) and "ближайшая конфета" or "монета")
         while alive and state.active and state.airWalk and job==token do
             char,hum,root=charParts()
@@ -279,7 +293,6 @@ local function glideToCoin(part,job)
                 state.status="Murderer на маршруте · меняю цель"
                 break
             end
-            updateNoclip()
             local flat=Vector3.new(vector.X,0,vector.Z)
             if flat.Magnitude>0.05 then
                 root.CFrame=CFrame.lookAt(nextPos,nextPos+flat.Unit)
@@ -527,7 +540,7 @@ local function updateTargetESP()
         targetHighlight.FillTransparency=0.2
         targetHighlight.OutlineTransparency=0
         targetHighlight.Enabled=false
-        targetHighlight.Parent=Workspace
+        targetHighlight.Parent=gui
     end
     if not targetBillboard then
         targetBillboard=Instance.new("BillboardGui")
@@ -592,7 +605,7 @@ local function button(parent,label,x,y,w,h)
     return b
 end
 local function card(parent,h)
-    local item=ui("Frame",{BackgroundColor3=CARD,Size=UDim2.new(1,-12,0,h),BorderSizePixel=0},parent)
+    local item=ui("Frame",{BackgroundColor3=CARD,Size=UDim2.new(1,-16,0,h),BorderSizePixel=0,ClipsDescendants=true},parent)
     round(item,11)
     border(item,PURPLE,0.9)
     return item
@@ -616,10 +629,9 @@ local scale=ui("UIScale",{Scale=1},panel)
 local strip=ui("Frame",{BackgroundColor3=ORANGE,BorderSizePixel=0,Size=UDim2.new(1,0,0,3)},panel)
 local header=ui("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,72),Active=true},panel)
 text(header,"🎃",14,12,-330,34,24,ORANGE,true).Size=UDim2.fromOffset(30,30)
-text(header,"HALLOWEN MM2",46,11,-120,28,19,LIGHT,true)
-text(header,"TELEGRAM  •  @AtlantaRobuxShop",46,42,-100,18,10,ORANGE,false)
-text(header,"✈",-88,13,-16,28,18,PURPLE,true).TextXAlignment=Enum.TextXAlignment.Right
-local close=button(header,"✕",-44,17,30,30)
+text(header,"HALLOWEN MM2",50,10,-140,28,19,LIGHT,true)
+text(header,"✈ TELEGRAM  @AtlantaRobuxShop",50,40,-140,18,10,ORANGE,false)
+local close=button(header,"✕",-46,15,32,32)
 local tabs=ui("Frame",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,74),Size=UDim2.new(1,-24,0,38)},panel)
 local tabNames={"ФАРМ","ЗАЩИТА","СТАТИСТИКА"}
 local tabButtons={}
@@ -655,7 +667,7 @@ local function showTab(idx)
 end
 for i,b in ipairs(tabButtons) do bind(b.MouseButton1Click,function() showTab(i) end) end
 local foot=ui("TextLabel",{
-    BackgroundTransparency=1,Text="🎃 TELEGRAM  •  @AtlantaRobuxShop  •  ✈",Font=Enum.Font.GothamBold,
+    BackgroundTransparency=1,Text="✈ TELEGRAM  •  @AtlantaRobuxShop",Font=Enum.Font.GothamBold,
     TextSize=10,TextColor3=MUTED,Position=UDim2.new(0,12,1,-30),Size=UDim2.new(1,-24,0,24)
 },panel)
 
@@ -669,7 +681,7 @@ text(airRow,"AIR WALK",12,6,-93,24,13,LIGHT,true)
 text(airRow,"Плавный полёт к ближайшей конфете с поворотом",12,31,-82,20,10,MUTED)
 local airBtn=button(airRow,"ON",-77,15,64,32)
 local speedCard=card(pages[1],132)
-text(speedCard,"СКОРОСТЬ ПЕРСОНАЖА",12,6,-110,24,12,LIGHT,true)
+text(speedCard,"СКОРОСТЬ ПОЛЁТА",12,6,-110,24,12,LIGHT,true)
 local speedInput=ui("TextBox",{
     BackgroundColor3=CARD2,BorderSizePixel=0,Font=Enum.Font.GothamBold,TextSize=15,
     TextColor3=ORANGE,Text="10",ClearTextOnFocus=false,
@@ -688,7 +700,7 @@ local speedKnob=ui("Frame",{
     AnchorPoint=Vector2.new(0.5,0.5),Size=UDim2.fromOffset(20,20),Position=UDim2.fromScale(0,0.5),
 },speedBar)
 round(speedKnob,11)
-text(speedCard,"1 — медленно     •     16 — стандарт     •     100 — максимум",12,77,-24,18,10,MUTED)
+text(speedCard,"1 — медленно     •     16 — обычно     •     100 — быстро",12,77,-24,18,10,MUTED)
 local speedWarn=text(speedCard,"⚠ Более 16 — возможны откаты и проблемы движения",12,103,-24,18,10,WARNING)
 local safeRow=card(pages[1],65)
 text(safeRow,"ИЗБЕГАТЬ MURDERER",12,6,-93,24,13,LIGHT,true)
@@ -777,7 +789,13 @@ refresh=function()
     bagValue.Text="Мешок: "..tostring(state.bag).." / "..tostring(state.bagLimit)
     roleValue.Text="Роль: "..tostring(state.role)
     statusText.Text=tostring(state.status)
-    updateTargetESP()
+    if not state.espFault then
+        local ok,err=pcall(updateTargetESP)
+        if not ok then
+            state.espFault=true
+            warn("Hallowen MM2 ESP disabled: "..tostring(err))
+        end
+    end
 end
 
 -- Smooth responsive opening, with a small clickable launcher on mobile.
@@ -882,6 +900,8 @@ pcall(function()
 end)
 
 bind(player.CharacterAdded,function()
+    state.currentTarget=nil
+    state.nearestDistance=0
     task.wait(0.6)
     if not alive then return end
     applySpeed()
@@ -897,7 +917,13 @@ bind(RunService.Heartbeat,function(dt)
         lastProtection=0
         if state.antiFling or next(savedOtherCollision)~=nil then updateAntiFling() end
         if state.noclip or state.visiting then updateNoclip() end
-        updateTargetESP()
+        if not state.espFault then
+            local ok,err=pcall(updateTargetESP)
+            if not ok then
+                state.espFault=true
+                warn("Hallowen MM2 ESP disabled: "..tostring(err))
+            end
+        end
     end
 end)
 bind(player.Idled,function()
@@ -986,3 +1012,17 @@ bind(gui.Destroying,function()
 end)
 refresh()
 show(true)
+
+end, function(err)
+    return tostring(err)
+end)
+if not __launchOk then
+    warn("HALLOWEN MM2 startup error: "..tostring(__launchError))
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification",{
+            Title="HALLOWEN MM2 - ERROR",
+            Text=tostring(__launchError):sub(1,190),
+            Duration=12
+        })
+    end)
+end
