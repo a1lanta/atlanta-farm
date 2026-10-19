@@ -1,7 +1,7 @@
--- HALLOWEN MM2 v2.3 - installer + launcher.
--- Saves this version to executor filesystem if writefile exists.
--- Queues local reload on supported teleports; no external URLs used.
-local CORE = [==[-- HALLOWEN MM2 v2.3 / nearest real pickup, ground safe flight, stable jump
+-- HALLOWEN MM2 v2.4 - installer + launcher.
+-- Saves a standalone local client script if the executor provides file APIs.
+-- No remote fetches, no external source execution.
+local CORE = [==[-- HALLOWEN MM2 v2.4 / nearest real pickup, ground safe flight, stable jump
 -- Self-contained. No remote loadstring or external dependencies.
 -- Movement and pickups remain subject to Roblox/server validation.
 
@@ -21,11 +21,11 @@ local ok, err = xpcall(function()
     local player = Players.LocalPlayer
     if not player then return end
     local playerGui = player:WaitForChild("PlayerGui")
-    local guiName = "HALLOWEN_MM2_OPTIMIZED_V23"
+    local guiName = "HALLOWEN_MM2_OPTIMIZED_V24"
 
     -- Running the script again safely removes earlier windows and their listeners.
     for _,name in ipairs({
-        guiName, "HALLOWEN_MM2_OPTIMIZED_V22", "HALLOWEN_MM2_OPTIMIZED_V21", "HALLOWEN_MM2_OPTIMIZED_V20", "HALLOWEN_MM2_V19", "HALLOWEN_MM2_V18",
+        guiName, "HALLOWEN_MM2_OPTIMIZED_V23", "HALLOWEN_MM2_OPTIMIZED_V22", "HALLOWEN_MM2_OPTIMIZED_V21", "HALLOWEN_MM2_OPTIMIZED_V20", "HALLOWEN_MM2_V19", "HALLOWEN_MM2_V18",
         "ATLANTA_FARM_V17", "ATLANTA_FARM_V16", "ATLANTA_FARM_V15"
     }) do
         local old = playerGui:FindFirstChild(name)
@@ -54,7 +54,7 @@ local ok, err = xpcall(function()
         farm=false, speed=25, noclip=true, autoRejoin=true,
         antiAfk=true, antiFling=true, avoidMurderer=true,
         visits=0, candies=0, coins=0, failures=0, disappearances=0,
-        target=nil, arrivedAt=nil, lastDistance=math.huge, lastProgressAt=0,
+        target=nil, arrivedAt=nil, lastDistance=math.huge, lastProgressAt=0, lastPosition=nil, targetStartedAt=0, targetInitialDistance=0,
         status="Готово · Noclip AUTO · скорость 25"
     }
     local alive = true
@@ -67,7 +67,7 @@ local ok, err = xpcall(function()
     local savedAutoRotate, savedJumpEnabled
     local floatAttachment,floatForce
     local autoRejoinCooldown = -math.huge
-    local escapeGoal, escapeStarted = nil, 0
+    local steerGoal, nextSteer = nil, 0
     local retryAfter = setmetatable({}, {__mode="k"})
     local nextScan, nextClip, nextUi, nextSafety = 0,0,0,0
     local gui
@@ -165,13 +165,8 @@ local ok, err = xpcall(function()
         Visible=true
     })
     radius(panel,16)
-    stroke(panel,C.orange,0.38)
+    -- No top stripe and no orange panel outline: both caused a visible top line.
     local scale=make("UIScale",panel,{Scale=1})
-    local topStripe=make("Frame",panel,{
-        Name="InsetTopStripe",BorderSizePixel=0,BackgroundColor3=C.orange,
-        Position=UDim2.fromOffset(11,1),Size=UDim2.new(1,-22,0,2)
-    })
-    radius(topStripe,2)
     local header=make("Frame",panel,{
         BackgroundTransparency=1,Size=UDim2.new(1,0,0,69),Active=true
     })
@@ -238,12 +233,12 @@ local ok, err = xpcall(function()
     end
     showTab(1)
 
-    local footer=label(panel,"✈ TELEGRAM  •  @AtlantaRobuxShop  •  v2.3",10,C.muted,true)
+    local footer=label(panel,"✈ TELEGRAM  •  @AtlantaRobuxShop  •  v2.4",10,C.muted,true)
     footer.TextXAlignment=Enum.TextXAlignment.Center
     footer.Position=UDim2.new(0,10,1,-30)
     footer.Size=UDim2.new(1,-20,0,23)
 
-    local farmRow,farmBtn=settingRow(pages[1],"AUTO CANDY FARM","Ближайшие предметы из CoinContainer")
+    local farmRow,farmBtn,farmHint=settingRow(pages[1],"AUTO CANDY FARM","Ближайшие предметы из CoinContainer")
     local speedCard=card(pages[1],115)
     local speedTitle=label(speedCard,"СКОРОСТЬ ПОЛЁТА",12,C.white,true)
     speedTitle.Position=UDim2.fromOffset(13,7)
@@ -308,8 +303,8 @@ local ok, err = xpcall(function()
 
     -- Optional executor file API: persists settings between client restarts if supported.
     -- Rejoin and reinjection are NOT guaranteed after a full kick / process shutdown.
-    local CONFIG_FILE="HALLOWEN_MM2_settings_v23.json"
-    local SCRIPT_FILE="HALLOWEN_MM2_Optimized_v23.lua"
+    local CONFIG_FILE="HALLOWEN_MM2_settings_v24.json"
+    local SCRIPT_FILE="HALLOWEN_MM2_Optimized_v24.lua"
     local function saveConfig()
         local data={farm=settings.farm,speed=settings.speed,antiAfk=settings.antiAfk,
             antiFling=settings.antiFling,avoidMurderer=settings.avoidMurderer,
@@ -373,6 +368,12 @@ local ok, err = xpcall(function()
         local seconds=math.floor(os.clock()-started)
         statsLines[5].Text=string.format("Время: %02d:%02d:%02d",math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
         statusText.Text=settings.status
+        if settings.target and settings.target.Parent and root then
+            local dist=math.floor((settings.target.Position-root.Position).Magnitude+0.5)
+            farmHint.Text="Цель: "..settings.target.Name.." · "..dist.." studs"
+        else
+            farmHint.Text="Ближайшая доступная цель из CoinContainer"
+        end
     end
 
     -- MM2 spawns active pickups below CoinContainer, typically with TouchInterest.
@@ -454,7 +455,7 @@ local ok, err = xpcall(function()
         if endEv and endEv:IsA("RemoteEvent") then
             connect(endEv.OnClientEvent,function()
                 roundKnown=true;roundActive=false;settings.target=nil;settings.arrivedAt=nil
-                escapeGoal=nil;nextScan=0
+                steerGoal=nil;nextSteer=0;nextScan=0
             end)
         end
     end
@@ -574,23 +575,64 @@ local ok, err = xpcall(function()
         end
         return false
     end
-    -- Keep away from Murderer while preferring the nearest *actual pickup*,
-    -- not a random part or a faraway coin promoted by name.
+    -- Only targets in the current level, near the player, with a verified floor.
+    -- This prevents selecting distant or below-map objects by name alone.
+    local floorParams=RaycastParams.new()
+    floorParams.FilterType=Enum.RaycastFilterType.Exclude
+    floorParams.RespectCanCollide=true
+    local function groundAt(point, referenceY, ignoreTarget)
+        if not character or not character.Parent then return nil end
+        floorParams.FilterDescendantsInstances=ignoreTarget and {character,ignoreTarget} or {character}
+        local origin=Vector3.new(point.X,referenceY+7,point.Z)
+        local hit=Workspace:Raycast(origin,Vector3.new(0,-30,0),floorParams)
+        if not hit then return nil end
+        local y=hit.Position.Y
+        if math.abs((y+2.7)-referenceY)>12 then return nil end
+        return y
+    end
+    local function segmentThreat(startPos,endPos,radius)
+        if not settings.avoidMurderer then return nil end
+        local vx=endPos.X-startPos.X;local vz=endPos.Z-startPos.Z
+        local norm=vx*vx+vz*vz
+        local r2=radius*radius
+        for _,m in ipairs(dangerPositions) do
+            local u=0
+            if norm>0.001 then
+                u=math.clamp(((m.X-startPos.X)*vx+(m.Z-startPos.Z)*vz)/norm,0,1)
+            end
+            local dx=startPos.X+vx*u-m.X
+            local dz=startPos.Z+vz*u-m.Z
+            if dx*dx+dz*dz<r2 then return m end
+        end
+        return nil
+    end
     local function chooseNearest()
-        if not root then return nil end
+        if not root or not root.Parent then return nil,math.huge end
         local origin=root.Position
-        local best,bestDist=nil,math.huge
+        local candidates={}
         local now=os.clock()
         for part in pairs(collectibles) do
             if not isPickup(part) then
                 collectibles[part]=nil;retryAfter[part]=nil
-            elseif now>=(retryAfter[part] or 0) and not nearDanger(part.Position,34) then
-                local d=part.Position-origin
-                local sq=d:Dot(d)
-                if sq<500*500 and sq<bestDist then best=part;bestDist=sq end
+            elseif now>=(retryAfter[part] or 0) and not nearDanger(part.Position,28) then
+                local vector=part.Position-origin
+                local sq=vector:Dot(vector)
+                if sq<=185*185 and math.abs(vector.Y)<=13 then
+                    -- Prefer a direct safe route but keep safe detours possible.
+                    local danger=segmentThreat(origin,part.Position,25)
+                    local score=sq+(danger and 32*32 or 0)
+                    candidates[#candidates+1]={part=part,score=score,distance=sq}
+                end
             end
         end
-        return best
+        table.sort(candidates,function(a,b) return a.score<b.score end)
+        for i=1,math.min(10,#candidates) do
+            local cand=candidates[i]
+            if groundAt(cand.part.Position,origin.Y,cand.part) then
+                return cand.part,math.sqrt(cand.distance)
+            end
+        end
+        return nil,math.huge
     end
     local function clearCurrentTarget()
         settings.target=nil
@@ -603,11 +645,18 @@ local ok, err = xpcall(function()
         settings.arrivedAt=nil
         settings.lastDistance=math.huge
         settings.lastProgressAt=os.clock()
-        settings.status="Лечу к ближайшей конфете · Noclip ON"
+        steerGoal=nil;nextSteer=0
+        settings.lastPosition=root.Position
+        settings.targetStartedAt=os.clock()
+        settings.targetInitialDistance=(target.Position-root.Position).Magnitude
+        settings.status="Лечу: "..target.Name.." · Noclip ON"
+        -- Visible in executor console for troubleshooting wrong target selection.
+        warn("[HALLOWEN MM2] Target: "..target:GetFullName().." distance="..
+            math.floor((target.Position-root.Position).Magnitude+0.5))
     end
     local function stopFlight()
         clearCurrentTarget()
-        escapeGoal=nil
+        steerGoal=nil;nextSteer=0
         restoreCollision()
         if root and root.Parent then
             root.AssemblyLinearVelocity=Vector3.zero
@@ -635,6 +684,7 @@ local ok, err = xpcall(function()
             if not succeeded then settings.failures+=1 end
         end
         clearCurrentTarget()
+        steerGoal=nil;nextSteer=0
         if succeeded then settings.status="Контакт с целью · ищу следующую · Noclip ON" end
         nextScan=0
     end
@@ -653,39 +703,36 @@ local ok, err = xpcall(function()
             end)
         end
     end
-    local floorParams=RaycastParams.new()
-    floorParams.FilterType=Enum.RaycastFilterType.Exclude
-    floorParams.RespectCanCollide=true
-    local lastFloor, lastFloorAt=nil,0
-    local function safeHeight(point, target)
-        local now=os.clock()
-        if now-lastFloorAt>0.12 then
-            floorParams.FilterDescendantsInstances=target and {character,target} or {character}
-            -- Cast from the desired position to detect floors near that route segment.
-            lastFloor=Workspace:Raycast(point+Vector3.new(0,4,0),Vector3.new(0,-82,0),floorParams)
-            lastFloorAt=now
-        end
-        if lastFloor then return math.max(point.Y,lastFloor.Position.Y+2.65) end
-        -- If no floor detected, do not dive rapidly into unbounded lower space.
-        return math.max(point.Y,root and root.Position.Y-1 or point.Y)
+    local function safeHeight(point, ignoreTarget)
+        if not root or not root.Parent then return nil end
+        local floor=groundAt(point,root.Position.Y,ignoreTarget)
+        if not floor then return nil end
+        -- Stay near floor, never follow a bad coin position below the map.
+        return math.max(floor+2.7, math.min(point.Y,floor+4.5))
     end
     local function moveStep(dest,dt)
-        if not root or not root.Parent then return end
-        local start=root.Position
-        local vec=dest-start
-        local dist=vec.Magnitude
-        if dist<0.025 then return end
-        local step=math.min(dist,settings.speed*math.clamp(dt,0.001,0.05))
-        local pos=start+vec.Unit*step
-        pos=Vector3.new(pos.X,safeHeight(pos,settings.target),pos.Z)
-        local flat=Vector3.new(vec.X,0,vec.Z)
-        if flat.Magnitude>0.04 then
-            root.CFrame=CFrame.lookAt(pos,pos+flat.Unit)
+        if not root or not root.Parent then return false end
+        local origin=root.Position
+        local vector=dest-origin
+        local distance=vector.Magnitude
+        if distance<0.025 then return true end
+        local amount=math.min(distance,settings.speed*math.clamp(dt,0.001,0.05))
+        local nextPos=origin+vector.Unit*amount
+        local height=safeHeight(nextPos,settings.target)
+        if not height then
+            settings.status="Нет пола на маршруте · меняю цель"
+            return false
+        end
+        nextPos=Vector3.new(nextPos.X,height,nextPos.Z)
+        local direction=Vector3.new(vector.X,0,vector.Z)
+        if direction.Magnitude>0.04 then
+            root.CFrame=CFrame.lookAt(nextPos,nextPos+direction.Unit)
         else
-            root.CFrame=CFrame.new(pos)*root.CFrame.Rotation
+            root.CFrame=CFrame.new(nextPos)*root.CFrame.Rotation
         end
         root.AssemblyLinearVelocity=Vector3.zero
         root.AssemblyAngularVelocity=Vector3.zero
+        return true
     end
     local function closestThreat(point)
         local nearest,dist=nil,math.huge
@@ -696,17 +743,44 @@ local ok, err = xpcall(function()
         end
         return nearest,math.sqrt(dist)
     end
-    local function dodgeMurderer(murderer)
-        local here=root.Position
-        local away=Vector3.new(here.X-murderer.X,0,here.Z-murderer.Z)
-        if away.Magnitude<0.5 then away=root.CFrame.LookVector end
-        away=Vector3.new(away.X,0,away.Z).Unit
-        -- Move far sideways, try a *small* descent, never below walkable floor.
-        local retreat=here+away*43+Vector3.new(0,-4,0)
-        escapeGoal=Vector3.new(retreat.X,safeHeight(retreat,nil),retreat.Z)
-        escapeStarted=os.clock()
-        clearCurrentTarget()
-        settings.status="Murderer рядом · отлетаю вниз и в сторону · Noclip ON"
+    -- Steer around a murderer in short, floor-verified legs, toward the chosen coin.
+    -- Never construct an unbounded escape destination outside the map.
+    local function waypointToward(destination)
+        local start=root.Position
+        local murderer=segmentThreat(start,destination,26)
+        if not murderer then return destination end
+        local toward=Vector3.new(destination.X-start.X,0,destination.Z-start.Z)
+        if toward.Magnitude<0.01 then return destination end
+        toward=toward.Unit
+        local away=Vector3.new(start.X-murderer.X,0,start.Z-murderer.Z)
+        if away.Magnitude<0.01 then away=Vector3.new(-toward.Z,0,toward.X) end
+        away=away.Unit
+        local side=Vector3.new(-toward.Z,0,toward.X)
+        local before=(Vector2.new(start.X-murderer.X,start.Z-murderer.Z)).Magnitude
+        local beforeGoal=(destination-start).Magnitude
+        local best,bestScore=nil,-math.huge
+        for _,proposal in ipairs({
+            away,away+side,away-side,
+            toward+side*1.8,toward-side*1.8,
+            away*0.8+toward+side,away*0.8+toward-side,
+            away*1.7+side*0.5,away*1.7-side*0.5
+        }) do
+            local dir=proposal.Unit
+            local trial=start+dir*math.min(10,beforeGoal)
+            local floor=groundAt(trial,start.Y,nil)
+            if floor then
+                trial=Vector3.new(trial.X,math.max(floor+2.7,math.min(start.Y,floor+4.5)),trial.Z)
+                local after=(Vector2.new(trial.X-murderer.X,trial.Z-murderer.Z)).Magnitude
+                -- When already inside the danger circle, moving outward is valid.
+                local legBlocked=before>=18 and segmentThreat(start,trial,math.min(18,math.max(5,before-2))) or nil
+                if after>=math.min(before,26)-0.8 and not legBlocked then
+                    local progress=beforeGoal-(destination-trial).Magnitude
+                    local score=progress*1.4+(after-before)*1.8
+                    if score>bestScore then best=trial;bestScore=score end
+                end
+            end
+        end
+        return best
     end
     local function updateFlight(dt)
         if not settings.farm then return end
@@ -725,50 +799,60 @@ local ok, err = xpcall(function()
             nextDangerRefresh=os.clock()+0.3
             collectDanger()
         end
-        local threat,dist=closestThreat(root.Position)
-        if settings.avoidMurderer and threat and dist<33 and not escapeGoal then
-            dodgeMurderer(threat)
-        end
-        if escapeGoal then
-            if (root.Position-escapeGoal).Magnitude<2.1 or os.clock()-escapeStarted>3 then
-                escapeGoal=nil;nextScan=0
-                settings.status="Ушёл от Murderer · ищу другую конфету"
-            else
-                moveStep(escapeGoal,dt)
-                return
-            end
-        end
         local target=settings.target
         if not target then return end
         if not isPickup(target) then finishTarget(target,false);return end
-        if nearDanger(target.Position,34) then
+        if nearDanger(target.Position,28) then
             finishTarget(target,false)
-            settings.status="Конфета рядом с Murderer · пропускаю"
+            settings.status="Цель рядом с Murderer · ищу другую"
             return
         end
-        -- Follow item at stable floor-safe height, not under the map.
-        local goal=target.Position
-        goal=Vector3.new(goal.X,safeHeight(goal,target),goal.Z)
-        local d=(goal-root.Position).Magnitude
-        if d<=1.0 then
+        local goalY=safeHeight(target.Position,target)
+        if not goalY then
+            finishTarget(target,false)
+            settings.status="Цель вне текущего этажа/карты · пропускаю"
+            return
+        end
+        local goal=Vector3.new(target.Position.X,goalY,target.Position.Z)
+        local distance=(goal-root.Position).Magnitude
+        if distance<=2.25 then
             if not settings.arrivedAt then
                 settings.arrivedAt=os.clock()
                 settings.visits+=1
-                settings.status="Касаюсь конфеты · Noclip ON"
+                settings.status="Контакт с целью · Noclip ON"
             end
             tryClientTouch(target)
-            -- Don't wait forever for server pickup; timeout and try other targets.
             if os.clock()-settings.arrivedAt>=0.28 then finishTarget(target,true) end
             return
         end
-        if d<settings.lastDistance-0.07 then
-            settings.lastDistance=d;settings.lastProgressAt=os.clock()
-        elseif os.clock()-settings.lastProgressAt>1.3 then
-            settings.status="Застревание · перестраиваю цель · Noclip ON"
+        -- Sideways steering is still progress; use actual position, not target distance.
+        local now=os.clock()
+        if not settings.lastPosition or (root.Position-settings.lastPosition).Magnitude>0.26 then
+            settings.lastPosition=root.Position
+            settings.lastProgressAt=now
+        elseif now-settings.lastProgressAt>2.1 then
             finishTarget(target,false)
+            settings.status="Нет движения · выбираю другую цель"
             return
         end
-        moveStep(goal,dt)
+        local timeout=math.max(12,settings.targetInitialDistance/math.max(settings.speed,1)*3+5)
+        if now-settings.targetStartedAt>timeout then
+            finishTarget(target,false)
+            settings.status="Маршрут слишком долгий · выбираю другую цель"
+            return
+        end
+        if not steerGoal or now>=nextSteer or (root.Position-steerGoal).Magnitude<2 then
+            nextSteer=now+0.3
+            steerGoal=waypointToward(goal)
+            if not steerGoal then
+                finishTarget(target,false)
+                settings.status="Нет безопасного обхода Murderer · ищу другую цель"
+                return
+            end
+        end
+        if not moveStep(steerGoal,dt) then
+            finishTarget(target,false)
+        end
     end
 
     connect(player.CharacterAdded,function()
@@ -781,7 +865,7 @@ local ok, err = xpcall(function()
             end
             if not alive then return end
             nextClip=0;nextScan=0;nextDangerRefresh=0
-            escapeGoal=nil
+            steerGoal=nil;nextSteer=0
             clearCurrentTarget()
         end)
     end)
@@ -929,12 +1013,21 @@ local ok, err = xpcall(function()
             if settings.farm and (not roundKnown or roundActive) then updateNoclip() end
         end
         if t>=nextScan then
-            nextScan=t+0.18
+            nextScan=t+0.35
             if settings.farm and root and humanoid and humanoid.Health>0
-                and not settings.target and not escapeGoal and (not roundKnown or roundActive) then
-                local nearest=chooseNearest()
-                if nearest then setCurrentTarget(nearest)
-                else settings.status="Жду появления предметов CoinContainer · Noclip ON" end
+                and (not roundKnown or roundActive) then
+                local nearest,nearDistance=chooseNearest()
+                local target=settings.target
+                if not target then
+                    if nearest then setCurrentTarget(nearest)
+                    else settings.status="Нет доступных монет на текущем этаже · Noclip ON" end
+                elseif nearest and nearest~=target and not settings.arrivedAt then
+                    local currentDistance=(root.Position-target.Position).Magnitude
+                    -- Switch only when demonstrably closer, not for trivial fluctuations.
+                    if currentDistance>7 and nearDistance<currentDistance*0.82 then
+                        setCurrentTarget(nearest)
+                    end
+                end
             end
         end
         if t>=nextSafety then
@@ -963,11 +1056,10 @@ local ok, err = xpcall(function()
 end, function(message)
     return tostring(message).."\n"..debug.traceback()
 end)
-if not ok then warn("[HALLOWEN MM2 v2.3] Startup error: "..tostring(err)) end
+if not ok then warn("[HALLOWEN MM2 v2.4] Startup error: "..tostring(err)) end
 ]==]
 if type(writefile)=="function" then
-    pcall(function() writefile("HALLOWEN_MM2_Optimized_v23.lua", CORE) end)
+    pcall(function() writefile("HALLOWEN_MM2_Optimized_v24.lua",CORE) end)
 end
-local executable, parseError = loadstring(CORE)
-if executable then executable()
-else warn("[HALLOWEN MM2 v2.3] Load error: "..tostring(parseError)) end
+local run=loadstring(CORE)
+if run then run() else warn("[HALLOWEN MM2 v2.4] Failed to compile client") 
