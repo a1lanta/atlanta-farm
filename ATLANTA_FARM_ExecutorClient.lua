@@ -1,444 +1,402 @@
 --[[
-  PHANTOM / MM2 — CANDY ENGINE 4.0
-  Completely rebuilt GUI; previous Halloween UI is not used.
-  IMPORTANT: Run the CONTENTS of this file, not an old GitHub loadstring.
-  This is a client-side script: physics flinging and game events are best effort.
+ ATLANTA FARM 5.0 | MM2 candy collector
+ New opaque orange / violet / white interface.
+ Fixes: confirmed pickup-only bag counter, visited coin memory,
+ straight movement without VectorForce, no per-frame descendant scans.
+ Client side: game/server updates can change how candy events behave.
 ]]
-print('[PHANTOM V4] BOOT START — this is NOT the old Halloween menu')
+print('[ATLANTA V5] Starting')
 
-local function boot()
+local function start()
     local Players = game:GetService('Players')
-    local TweenService = game:GetService('TweenService')
-    local UserInputService = game:GetService('UserInputService')
     local RunService = game:GetService('RunService')
+    local UserInputService = game:GetService('UserInputService')
     local ReplicatedStorage = game:GetService('ReplicatedStorage')
     local VirtualUser = game:GetService('VirtualUser')
     local player = Players.LocalPlayer
-    if not player then
-        local since = os.clock()
-        repeat task.wait(0.1); player = Players.LocalPlayer until player or os.clock()-since > 12
-    end
-    assert(player, '[PHANTOM V4] LocalPlayer missing')
+    assert(player, 'LocalPlayer unavailable')
     local playerGui = player:WaitForChild('PlayerGui', 12)
-    assert(playerGui, '[PHANTOM V4] PlayerGui missing')
+    assert(playerGui, 'PlayerGui unavailable')
 
-    local globalEnv = nil
-    pcall(function() if type(getgenv) == 'function' then globalEnv = getgenv() end end)
-    if globalEnv and type(globalEnv.PHANTOM_MM2_SHUTDOWN) == 'function' then
-        pcall(globalEnv.PHANTOM_MM2_SHUTDOWN)
-    end
-
-    local scopes = {playerGui}
-    pcall(function() table.insert(scopes, game:GetService('CoreGui')) end)
-    pcall(function()
-        if type(gethui) == 'function' then
-            local ui = gethui()
-            if ui then table.insert(scopes, ui) end
+    local env = nil
+    pcall(function() if type(getgenv) == 'function' then env = getgenv() end end)
+    if env then
+        for _, name in ipairs({'ATLANTA_V5_STOP', 'PHANTOM_MM2_SHUTDOWN'}) do
+            if type(env[name]) == 'function' then pcall(env[name]) end
         end
-    end)
-    for _, scope in ipairs(scopes) do
-        for _, name in ipairs({'HalloweenAutofarm', 'HalloweenAutofarmV3', 'PHANTOM_MM2_V4'}) do
-            local old = scope:FindFirstChild(name)
-            if old then pcall(function() old:Destroy() end) end
+    end
+    for _, holder in ipairs({playerGui, game:GetService('CoreGui')}) do
+        for _, name in ipairs({'HalloweenAutofarm', 'HalloweenAutofarmV3',
+            'PHANTOM_MM2_V4', 'ATLANTA_FARM_V5'}) do
+            pcall(function()
+                local old = holder:FindFirstChild(name)
+                if old then old:Destroy() end
+            end)
         end
     end
 
-    local state = {alive = true, connections = {}, move = nil, moving = false,
-        float = nil, attachment = nil, collision = {}, ignored = {},
-        active = false, resetting = false, endGame = false, version = '4.0'}
-    local cfg = {farm = false, speed = 25, avoid = true, antiFling = true,
-        autoReset = true, autoEnd = false, antiAFK = true}
-    local bag, lifetime, startTime = 0, 0, os.clock()
-    local roundActive, lastRoundEnd = false, -math.huge
-    local murderer = nil
-    local lastReset = -math.huge
+    local cfg = {farm=false, speed=25, avoid=true, antiFling=true,
+                 reset50=true, autoEnd=false, antiAFK=true}
+    local state = {alive=true, moving=false, resetting=false, endGame=false,
+        connections={}, collision={}, candidate=nil, candidateUntil=0,
+        ignored=setmetatable({}, {__mode='k'}), collected=setmetatable({}, {__mode='k'}),
+        currentTarget=nil, round=false, lastRoundEnd=-math.huge, murderer=nil,
+        bag=0, total=0, started=os.clock(), cooldownReset=-math.huge}
 
-    local function connect(signal, fn)
-        local c = signal:Connect(fn)
+    local function connect(signal, callback)
+        local c = signal:Connect(callback)
         table.insert(state.connections, c)
         return c
     end
-    local function make(kind, props, parent)
-        local o = Instance.new(kind)
-        for k, v in pairs(props or {}) do o[k] = v end
-        if parent then o.Parent = parent end
+    local function make(className, parent, props)
+        local o = Instance.new(className)
+        for k,v in pairs(props or {}) do o[k]=v end
+        o.Parent=parent
         return o
     end
-    local P = {
-        bg = Color3.fromRGB(11, 16, 24), panel = Color3.fromRGB(20, 28, 40),
-        card = Color3.fromRGB(25, 35, 49), alt = Color3.fromRGB(33, 45, 61),
-        edge = Color3.fromRGB(53, 69, 84), text = Color3.fromRGB(238, 247, 250),
-        muted = Color3.fromRGB(143, 163, 180),
-        mint = Color3.fromRGB(64, 232, 197), green = Color3.fromRGB(111, 232, 159),
-        red = Color3.fromRGB(255, 119, 129), off = Color3.fromRGB(72, 86, 103),
+    local function corner(o, n)
+        make('UICorner', o, {CornerRadius=UDim.new(0,n)})
+        return o
+    end
+    local function stroke(o, color, thickness)
+        make('UIStroke',o,{Color=color,Thickness=thickness or 1,
+            ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
+    end
+    local CL = {
+        bg=Color3.fromRGB(17,9,28), surface=Color3.fromRGB(29,16,47),
+        card=Color3.fromRGB(38,22,61), off=Color3.fromRGB(73,52,94),
+        border=Color3.fromRGB(101,60,144), violet=Color3.fromRGB(157,83,243),
+        orange=Color3.fromRGB(255,129,35), white=Color3.fromRGB(253,250,255),
+        muted=Color3.fromRGB(192,170,214), red=Color3.fromRGB(255,115,108)
     }
-    local function round(obj, n)
-        make('UICorner', {CornerRadius=UDim.new(0, n or 10)}, obj)
-        return obj
-    end
-    local function outline(obj, color, transparency)
-        return make('UIStroke', {Color=color or P.edge, Thickness=1,
-            Transparency=transparency or 0.3, ApplyStrokeMode=Enum.ApplyStrokeMode.Border}, obj)
-    end
-    local function tween(obj, seconds, props)
-        local t = TweenService:Create(obj, TweenInfo.new(seconds, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
-        t:Play()
-        return t
-    end
-    local function label(parent, value, pos, size, txtSize, color, bold)
-        return make('TextLabel', {Text=tostring(value), Position=pos, Size=size,
-            BackgroundTransparency=1, TextXAlignment=Enum.TextXAlignment.Left,
-            TextYAlignment=Enum.TextYAlignment.Center, TextWrapped=false,
-            Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,
-            TextSize=txtSize or 12, TextColor3=color or P.text}, parent)
-    end
-    local function frame(parent, pos, size, color, radius)
-        local f = make('Frame', {Position=pos, Size=size, BackgroundColor3=color or P.card,
-            BorderSizePixel=0}, parent)
-        if radius then round(f, radius) end
+    local function box(parent, name, size, position, color, radius)
+        local f=make('Frame',parent,{Name=name,Size=size,Position=position,
+            BackgroundColor3=color,BackgroundTransparency=0,BorderSizePixel=0})
+        if radius then corner(f,radius) end
         return f
     end
-    local gui = make('ScreenGui', {Name='PHANTOM_MM2_V4', ResetOnSpawn=false,
-        IgnoreGuiInset=true, DisplayOrder=999999, ZIndexBehavior=Enum.ZIndexBehavior.Sibling}, playerGui)
-    state.gui = gui
-    local W, H = 382, 486
-    local shadow = frame(gui, UDim2.new(0.5, -W/2-7, 0.5, -H/2),
-        UDim2.fromOffset(W+14, H+17), Color3.fromRGB(0,0,0), 22)
-    shadow.BackgroundTransparency=0.42
-    local win = frame(gui, UDim2.fromScale(0.5,0.5), UDim2.fromOffset(W,H), P.bg, 20)
-    win.Name='PHANTOM_Window'; win.AnchorPoint=Vector2.new(0.5,0.5)
-    win.ClipsDescendants=true; win.Active=true
-    outline(win, P.edge, 0.13)
-    shadow.AnchorPoint=Vector2.new(0.5,0.5)
-    shadow.Position=UDim2.new(0.5,0,0.5,7)
-    local accent = frame(win, UDim2.fromOffset(18,13), UDim2.fromOffset(4,34), P.mint, 2)
-    local header = frame(win, UDim2.fromOffset(0,0), UDim2.new(1,0,0,70), P.bg)
-    header.BackgroundTransparency=1; header.Active=true
-    accent.Parent=header
-    local brand = label(header,'PHANTOM',UDim2.fromOffset(33,11),UDim2.fromOffset(183,24),20,P.text,true)
-    brand.Name='Brand'
-    label(header,'MM2  /  CANDY ENGINE',UDim2.fromOffset(34,36),UDim2.fromOffset(220,16),10,P.muted,true)
-    local collapse = make('TextButton',{Name='Minimize',Position=UDim2.new(1,-87,0,17),
-        Size=UDim2.fromOffset(30,30), Text='−', TextSize=21,Font=Enum.Font.GothamBold,
-        TextColor3=P.muted,BackgroundColor3=P.panel,BorderSizePixel=0,AutoButtonColor=false},header)
-    round(collapse,9)
-    local close = make('TextButton',{Name='Close',Position=UDim2.new(1,-51,0,17),
-        Size=UDim2.fromOffset(30,30),Text='×',TextSize=20,Font=Enum.Font.GothamBold,
-        TextColor3=P.text,BackgroundColor3=P.panel,BorderSizePixel=0,AutoButtonColor=false},header)
-    round(close,9)
-    local line = frame(win,UDim2.fromOffset(18,68),UDim2.new(1,-36,0,1),P.edge)
-    line.BackgroundTransparency=0.5
+    local function text(parent, value, size, position, fontSize, color, bold)
+        return make('TextLabel',parent,{Text=tostring(value),Size=size,Position=position,
+            BackgroundTransparency=1,TextColor3=color or CL.white,
+            Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,
+            TextSize=fontSize or 12,TextXAlignment=Enum.TextXAlignment.Left,
+            TextYAlignment=Enum.TextYAlignment.Center,TextTruncate=Enum.TextTruncate.AtEnd})
+    end
+    local function button(parent, value, size, position, background, foreground, radius)
+        local b=make('TextButton',parent,{Text=value,Size=size,Position=position,
+            BackgroundColor3=background,BackgroundTransparency=0,
+            TextColor3=foreground or CL.white,TextSize=12,
+            Font=Enum.Font.GothamBold,AutoButtonColor=false,BorderSizePixel=0})
+        corner(b,radius or 10)
+        return b
+    end
 
-    local tabBackground = frame(win, UDim2.fromOffset(18,83), UDim2.new(1,-36,0,45),P.panel,12)
+    -- Solid, compact GUI. No floating shadow/transparent glass.
+    local gui=make('ScreenGui',playerGui,{Name='ATLANTA_FARM_V5',
+        ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=999999,
+        ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
+    local W,H=350,430
+    local window=box(gui,'Window',UDim2.fromOffset(W,H),UDim2.fromScale(0.5,0.5),CL.bg,18)
+    window.AnchorPoint=Vector2.new(0.5,0.5)
+    window.ClipsDescendants=true
+    window.Active=true
+    stroke(window,CL.violet,1.5)
+
+    local stripe=box(window,'OrangeStripe',UDim2.new(1,0,0,4),UDim2.fromOffset(0,0),CL.orange,0)
+    stripe.ZIndex=5
+    local header=box(window,'Header',UDim2.new(1,0,0,65),UDim2.fromOffset(0,0),CL.bg,0)
+    header.Active=true
+    text(header,'ATLANTA',UDim2.fromOffset(190,27),UDim2.fromOffset(17,13),21,CL.white,true)
+    text(header,'FARM  /  MM2',UDim2.fromOffset(195,17),UDim2.fromOffset(18,39),10,CL.orange,true)
+    local minBtn=button(header,'−',UDim2.fromOffset(29,29),UDim2.new(1,-74,0,19),CL.surface,CL.white)
+    local closeBtn=button(header,'×',UDim2.fromOffset(29,29),UDim2.new(1,-39,0,19),CL.surface,CL.white)
+    local hairline=box(window,'Divider',UDim2.new(1,-30,0,1),UDim2.fromOffset(15,65),CL.border,0)
+
     local tabs, pages = {}, {}
-    local names = {'FARM','DEFENSE','SESSION'}
-    local currentTab = 'FARM'
-    for i,name in ipairs(names) do
-        local btn = make('TextButton',{Name=name..'_TAB',Position=UDim2.new((i-1)/3,4,0,5),
-            Size=UDim2.new(1/3,-8,0,35),BackgroundColor3=i==1 and P.mint or P.panel,
-            Text=name,TextSize=11,Font=Enum.Font.GothamBold,
-            TextColor3=i==1 and P.bg or P.muted,BorderSizePixel=0,AutoButtonColor=false},tabBackground)
-        round(btn,9)
-        tabs[name]=btn
-    end
-    for _,name in ipairs(names) do
-        local page = make('ScrollingFrame',{Name=name..'_PAGE',
-            Position=UDim2.fromOffset(18,139),Size=UDim2.new(1,-36,1,-197),
-            BackgroundTransparency=1,BorderSizePixel=0,Active=true,
-            ScrollingDirection=Enum.ScrollingDirection.Y,
-            ScrollBarThickness=3,ScrollBarImageColor3=P.mint,
-            CanvasSize=UDim2.fromOffset(0,0),Visible=name==currentTab},win)
-        make('UIPadding',{PaddingTop=UDim.new(0,3),PaddingBottom=UDim.new(0,8),
-            PaddingLeft=UDim.new(0,1),PaddingRight=UDim.new(0,7)},page)
-        local layout=make('UIListLayout',{Padding=UDim.new(0,10),
-            SortOrder=Enum.SortOrder.LayoutOrder},page)
+    local tabbar=box(window,'Tabs',UDim2.new(1,-28,0,43),UDim2.fromOffset(14,76),CL.surface,12)
+    local labels={ {'FARM','ФАРМ'}, {'SAFETY','ЗАЩИТА'}, {'STATS','СТАТИСТИКА'} }
+    local selected='FARM'
+    for i,item in ipairs(labels) do
+        local key,caption=item[1],item[2]
+        local btn=button(tabbar,caption,UDim2.new(1/3,-6,1,-8),
+            UDim2.new((i-1)/3,4,0,4),i==1 and CL.orange or CL.surface,
+            i==1 and CL.bg or CL.muted)
+        btn.TextSize=i==3 and 10 or 11
+        tabs[key]=btn
+        local scroll=make('ScrollingFrame',window,{Name=key..'_Page',
+            Position=UDim2.fromOffset(14,131),Size=UDim2.new(1,-28,1,-185),
+            Visible=key==selected,BackgroundTransparency=1,BorderSizePixel=0,
+            ScrollBarThickness=3,ScrollBarImageColor3=CL.violet,
+            CanvasSize=UDim2.fromOffset(0,0),ScrollingDirection=Enum.ScrollingDirection.Y})
+        make('UIPadding',scroll,{PaddingRight=UDim.new(0,6),
+            PaddingBottom=UDim.new(0,7)})
+        local layout=make('UIListLayout',scroll,{Padding=UDim.new(0,9),
+            SortOrder=Enum.SortOrder.LayoutOrder})
         connect(layout:GetPropertyChangedSignal('AbsoluteContentSize'),function()
-            page.CanvasSize=UDim2.fromOffset(0,layout.AbsoluteContentSize.Y+15)
+            scroll.CanvasSize=UDim2.fromOffset(0,layout.AbsoluteContentSize.Y+12)
         end)
-        pages[name]={page=page,next=0}
+        pages[key]={scroller=scroll,index=0}
+        connect(btn.MouseButton1Click,function()
+            selected=key
+            for name,b in pairs(tabs) do
+                local active=name==key
+                b.BackgroundColor3=active and CL.orange or CL.surface
+                b.TextColor3=active and CL.bg or CL.muted
+                pages[name].scroller.Visible=active
+            end
+        end)
     end
-    local function selectTab(name)
-        currentTab=name
-        for n,btn in pairs(tabs) do
-            pages[n].page.Visible=n==name
-            tween(btn,0.13,{BackgroundColor3=n==name and P.mint or P.panel,
-                TextColor3=n==name and P.bg or P.muted})
-        end
-    end
-    for n,btn in pairs(tabs) do
-        btn.MouseButton1Click:Connect(function() selectTab(n) end)
-    end
-    local footer = frame(win,UDim2.new(0,18,1,-46),UDim2.new(1,-36,0,34),P.panel,9)
-    local dot=frame(footer,UDim2.fromOffset(10,14),UDim2.fromOffset(7,7),P.muted,4)
-    local statusText=label(footer,'READY / Waiting',UDim2.fromOffset(23,4),
-        UDim2.new(1,-84,0,26),11,P.muted,false)
-    local ver=label(footer,'v4.0',UDim2.new(1,-59,0,4),UDim2.fromOffset(53,26),11,P.mint,true)
-    ver.TextXAlignment=Enum.TextXAlignment.Right
-    local function status(s, kind)
+    local footer=box(window,'Footer',UDim2.new(1,-28,0,37),UDim2.new(0,14,1,-47),CL.surface,11)
+    local statusLabel=text(footer,'●  ГОТОВ',UDim2.new(1,-70,1,0),UDim2.fromOffset(11,0),11,CL.muted)
+    local versionLabel=text(footer,'v5.0',UDim2.fromOffset(55,37),UDim2.new(1,-65,0,0),11,CL.orange,true)
+    versionLabel.TextXAlignment=Enum.TextXAlignment.Right
+    local function status(value, good)
         if not state.alive then return end
-        statusText.Text=s
-        dot.BackgroundColor3=kind=='ok' and P.green or kind=='warn' and P.red
-            or kind=='work' and P.mint or P.muted
+        statusLabel.Text='●  '..value
+        statusLabel.TextColor3=good and CL.orange or CL.muted
     end
     local function card(tab, height)
-        local entry=pages[tab]
-        entry.next=entry.next+1
-        local f=frame(entry.page,UDim2.fromOffset(0,0),
-            UDim2.new(1,-1,0,height),P.panel,12)
-        f.LayoutOrder=entry.next
-        outline(f,P.edge,0.57)
-        return f
+        local page=pages[tab]
+        page.index=page.index+1
+        local item=box(page.scroller,'Item'..page.index,UDim2.new(1,-1,0,height),
+            UDim2.fromOffset(0,0),CL.card,12)
+        item.LayoutOrder=page.index
+        stroke(item,CL.border,1)
+        return item
     end
-    local function titleCard(tab,title,detail)
-        local f=card(tab,54)
-        f.BackgroundTransparency=1
-        label(f,title,UDim2.fromOffset(5,0),UDim2.new(1,-10,0,26),16,P.text,true)
-        label(f,detail,UDim2.fromOffset(5,27),UDim2.new(1,-10,0,17),11,P.muted)
-    end
-    local function pillToggle(parent, initial, changed)
-        local btn = make('TextButton',{Position=UDim2.new(1,-65,0.5,-14),
-            Size=UDim2.fromOffset(52,28),BackgroundColor3=initial and P.mint or P.off,
-            BorderSizePixel=0,Text='',AutoButtonColor=false},parent)
-        round(btn,14)
-        local knob=frame(btn,initial and UDim2.new(1,-25,0,4) or UDim2.fromOffset(4,4),
-            UDim2.fromOffset(20,20), P.bg,10)
-        local value=initial
-        btn.MouseButton1Click:Connect(function()
-            value=not value
-            tween(btn,0.12,{BackgroundColor3=value and P.mint or P.off})
-            tween(knob,0.12,{Position=value and UDim2.new(1,-25,0,4) or UDim2.fromOffset(4,4)})
-            changed(value)
+    local function setting(tab,name,detail,initial,callback)
+        local item=card(tab,58)
+        text(item,name,UDim2.new(1,-92,0,24),UDim2.fromOffset(13,7),13,CL.white,true)
+        text(item,detail,UDim2.new(1,-92,0,18),UDim2.fromOffset(13,31),10,CL.muted)
+        local sw=button(item,'',UDim2.fromOffset(49,26),UDim2.new(1,-63,0.5,-13),
+            initial and CL.orange or CL.off,CL.white,13)
+        local dot=box(sw,'Dot',UDim2.fromOffset(18,18),
+            initial and UDim2.fromOffset(27,4) or UDim2.fromOffset(4,4),CL.white,9)
+        connect(sw.MouseButton1Click,function()
+            initial=not initial
+            sw.BackgroundColor3=initial and CL.orange or CL.off
+            dot.Position=initial and UDim2.fromOffset(27,4) or UDim2.fromOffset(4,4)
+            callback(initial)
         end)
-        return btn
+        return item
     end
-    local function setting(tab,name,desc,on,change)
-        local f=card(tab,63)
-        label(f,name,UDim2.fromOffset(14,9),UDim2.new(1,-92,0,23),13,P.text,true)
-        label(f,desc,UDim2.fromOffset(14,34),UDim2.new(1,-92,0,15),10,P.muted)
-        pillToggle(f,on,change)
-        return f
-    end
-    local function metric(tab,name,value)
-        local f=card(tab,54)
-        label(f,name,UDim2.fromOffset(13,9),UDim2.new(0.58,0,0,36),12,P.muted)
-        local out=label(f,tostring(value),UDim2.new(0.58,0,0,9),
-            UDim2.new(0.42,-13,0,36),15,P.mint,true)
-        out.TextXAlignment=Enum.TextXAlignment.Right
-        return out
+    local function stat(tab,title,value)
+        local item=card(tab,47)
+        text(item,title,UDim2.new(0.57,0,1,0),UDim2.fromOffset(13,0),12,CL.muted)
+        local v=text(item,value,UDim2.new(0.4,-13,1,0),UDim2.new(0.6,0,0,0),
+            13,CL.orange,true)
+        v.TextXAlignment=Enum.TextXAlignment.Right
+        return v
     end
 
-    -- FARM PAGE: a hero control + bag indicator + adjustable slider.
-    local hero = card('FARM',117)
-    hero.BackgroundColor3=P.card
-    label(hero,'AUTO COLLECT',UDim2.fromOffset(15,10),UDim2.new(1,-102,0,27),15,P.text,true)
-    label(hero,'Smart candy navigation',UDim2.fromOffset(15,35),
-        UDim2.new(1,-102,0,18),11,P.muted)
-    pillToggle(hero,cfg.farm,function(v)
+    setting('FARM','Автофарм','Сбор ближайших конфет',cfg.farm,function(v)
         cfg.farm=v
-        status(v and 'SEARCHING / Candy' or 'READY / Waiting',v and 'work' or nil)
+        status(v and 'ПОИСК КОНФЕТ' or 'ГОТОВ',v)
     end)
-    local progressBase=frame(hero,UDim2.fromOffset(15,84),UDim2.new(1,-99,0,8),P.off,4)
-    local progressFill=frame(progressBase,UDim2.fromOffset(0,0),UDim2.fromScale(0,1),P.mint,4)
-    local bagLabel=label(hero,'0 / 50',UDim2.new(1,-78,0,76),
-        UDim2.fromOffset(65,23),12,P.mint,true)
-    bagLabel.TextXAlignment=Enum.TextXAlignment.Right
-    local tip=card('FARM',45)
-    label(tip,'MODE',UDim2.fromOffset(14,8),UDim2.fromOffset(59,27),10,P.muted,true)
-    local targetLabel=label(tip,'Standing by',UDim2.fromOffset(75,8),
-        UDim2.new(1,-88,0,27),12,P.text,true)
-    local sliderBox=card('FARM',100)
-    label(sliderBox,'FLIGHT SPEED',UDim2.fromOffset(14,10),
-        UDim2.new(1,-104,0,26),13,P.text,true)
-    local speedLabel=label(sliderBox,tostring(cfg.speed),UDim2.new(1,-63,0,9),
-        UDim2.fromOffset(48,27),16,P.mint,true)
-    speedLabel.TextXAlignment=Enum.TextXAlignment.Right
-    local track=frame(sliderBox,UDim2.fromOffset(16,63),
-        UDim2.new(1,-32,0,7),P.off,4)
-    local fill=frame(track,UDim2.fromOffset(0,0),
-        UDim2.new((cfg.speed-1)/99,0,1,0),P.mint,4)
-    local handle=frame(track,UDim2.new((cfg.speed-1)/99,0,0.5,-9),
-        UDim2.fromOffset(18,18),P.text,9)
-    outline(handle,P.mint,0.1)
-    local hit=make('TextButton',{Position=UDim2.fromOffset(0,-16),
-        Size=UDim2.new(1,0,0,38),Text='',BackgroundTransparency=1,
-        AutoButtonColor=false},track)
-    local movingSlider=false
-    local function updateSpeed(pos)
-        if track.AbsoluteSize.X<1 then return end
-        local ratio=math.clamp((pos-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
-        cfg.speed=math.floor(1+99*ratio+0.5)
-        speedLabel.Text=tostring(cfg.speed)
+    local speedCard=card('FARM',81)
+    text(speedCard,'Скорость',UDim2.fromOffset(205,24),UDim2.fromOffset(13,7),14,CL.white,true)
+    local speedText=text(speedCard,tostring(cfg.speed),UDim2.fromOffset(60,24),
+        UDim2.new(1,-74,0,7),14,CL.orange,true)
+    speedText.TextXAlignment=Enum.TextXAlignment.Right
+    local track=box(speedCard,'Track',UDim2.new(1,-29,0,7),UDim2.fromOffset(14,54),CL.off,4)
+    local fill=box(track,'Fill',UDim2.new((cfg.speed-1)/99,0,1,0),UDim2.fromOffset(0,0),CL.orange,4)
+    local handle=box(track,'Knob',UDim2.fromOffset(17,17),
+        UDim2.new((cfg.speed-1)/99,-8,0.5,-8),CL.white,9)
+    local sliderHit=button(track,'',UDim2.new(1,0,0,32),UDim2.fromOffset(0,-12),CL.surface,CL.white)
+    sliderHit.BackgroundTransparency=1
+    local adjusting=false
+    local function setSpeed(pixel)
+        if track.AbsoluteSize.X<2 then return end
+        local ratio=math.clamp((pixel-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
+        cfg.speed=math.floor(1+ratio*99+0.5)
         ratio=(cfg.speed-1)/99
         fill.Size=UDim2.new(ratio,0,1,0)
-        handle.Position=UDim2.new(ratio,0,0.5,-9)
+        handle.Position=UDim2.new(ratio,-8,0.5,-8)
+        speedText.Text=tostring(cfg.speed)
     end
-    hit.InputBegan:Connect(function(input)
+    connect(sliderHit.InputBegan,function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 or
             input.UserInputType==Enum.UserInputType.Touch then
-            movingSlider=true; updateSpeed(input.Position.X)
+            adjusting=true
+            setSpeed(input.Position.X)
         end
     end)
     connect(UserInputService.InputChanged,function(input)
-        if movingSlider and (input.UserInputType==Enum.UserInputType.MouseMovement
-            or input.UserInputType==Enum.UserInputType.Touch) then
-            updateSpeed(input.Position.X)
-        end
-    end)
-    connect(UserInputService.InputEnded,function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1
-            or input.UserInputType==Enum.UserInputType.Touch then movingSlider=false end
-    end)
-    local farmHint=card('FARM',60)
-    label(farmHint,'AUTO ROUTING',UDim2.fromOffset(13,7),
-        UDim2.new(1,-25,0,24),12,P.mint,true)
-    label(farmHint,'Flight adjusts to threats and morphs.',
-        UDim2.fromOffset(13,29),UDim2.new(1,-25,0,21),11,P.muted)
-
-    -- DEFENSE PAGE
-    titleCard('DEFENSE','PROTECTION','Movement, survival and bag management')
-    setting('DEFENSE','Avoid Murderer','Fly to safer candy clusters',cfg.avoid,function(v) cfg.avoid=v end)
-    setting('DEFENSE','Anti Fling','Block unwanted physics spikes',cfg.antiFling,function(v) cfg.antiFling=v end)
-    setting('DEFENSE','Auto Reset 50/50','Reset when the bag reaches 50',cfg.autoReset,function(v) cfg.autoReset=v end)
-    setting('DEFENSE','Auto End Game · BETA','Try physics interaction after reset',cfg.autoEnd,function(v) cfg.autoEnd=v end)
-    setting('DEFENSE','Anti AFK','Prevent idle timeout',cfg.antiAFK,function(v) cfg.antiAFK=v end)
-
-    -- SESSION PAGE
-    titleCard('SESSION','LIVE SESSION','Collection statistics and diagnostics')
-    local statBag=metric('SESSION','Current candy bag','0 / 50')
-    local statTotal=metric('SESSION','Candy pickups',0)
-    local statRound=metric('SESSION','Round','Waiting')
-    local statChar=metric('SESSION','Character','Unknown')
-    local statTime=metric('SESSION','Active time','0m 0s')
-    local statVersion=metric('SESSION','Interface','PHANTOM v4.0')
-    statVersion.TextSize=11
-    local function showBag()
-        local text=tostring(bag)..' / 50'
-        bagLabel.Text=text; statBag.Text=text
-        tween(progressFill,0.18,{Size=UDim2.new(math.clamp(bag/50,0,1),0,1,0)})
-        statTotal.Text=tostring(lifetime)
-    end
-
-    -- Header drag, with a screen-fit UI scale for phone screens.
-    local scale=make('UIScale',{Scale=1},win)
-    local shadeScale=make('UIScale',{Scale=1},shadow)
-    local function fit()
-        local camera=workspace.CurrentCamera
-        if camera then
-            local viewport=camera.ViewportSize
-            local s=math.clamp(math.min((viewport.X-22)/W,(viewport.Y-32)/H),0.52,1)
-            scale.Scale=s; shadeScale.Scale=s
-        end
-    end
-    fit()
-    local viewCamera=workspace.CurrentCamera
-    if viewCamera then connect(viewCamera:GetPropertyChangedSignal('ViewportSize'),fit) end
-    local dragging,origin,from=false,nil,nil
-    header.InputBegan:Connect(function(input)
-        if input.UserInputType~=Enum.UserInputType.MouseButton1 and
-           input.UserInputType~=Enum.UserInputType.Touch then return end
-        local pt=input.Position
-        if pt.X >= collapse.AbsolutePosition.X-4 then return end
-        dragging=true; origin=pt; from=win.Position
-    end)
-    connect(UserInputService.InputChanged,function(input)
-        if not dragging or not from then return end
-        if input.UserInputType~=Enum.UserInputType.MouseMovement and
-            input.UserInputType~=Enum.UserInputType.Touch then return end
-        local d=input.Position-origin
-        local x=from.X.Offset+d.X/(scale.Scale)
-        local y=from.Y.Offset+d.Y/(scale.Scale)
-        win.Position=UDim2.new(from.X.Scale,x,from.Y.Scale,y)
-        shadow.Position=UDim2.new(win.Position.X.Scale,win.Position.X.Offset,win.Position.Y.Scale,win.Position.Y.Offset+7)
+        if adjusting and (input.UserInputType==Enum.UserInputType.MouseMovement or
+            input.UserInputType==Enum.UserInputType.Touch) then setSpeed(input.Position.X) end
     end)
     connect(UserInputService.InputEnded,function(input)
         if input.UserInputType==Enum.UserInputType.MouseButton1 or
-            input.UserInputType==Enum.UserInputType.Touch then dragging=false end
+            input.UserInputType==Enum.UserInputType.Touch then adjusting=false end
     end)
-    local collapsed=false
-    collapse.MouseButton1Click:Connect(function()
-        collapsed=not collapsed
-        collapse.Text=collapsed and '+' or '−'
-        tabBackground.Visible=not collapsed; line.Visible=not collapsed
-        footer.Visible=not collapsed
-        for n,data in pairs(pages) do data.page.Visible=not collapsed and n==currentTab end
-        tween(win,0.19,{Size=UDim2.fromOffset(W,collapsed and 70 or H)})
-        tween(shadow,0.19,{Size=UDim2.fromOffset(W+14,(collapsed and 70 or H)+17)})
-    end)
+    local bagCard=card('FARM',80)
+    text(bagCard,'Мешок (подтверждено)',UDim2.new(1,-106,0,25),
+        UDim2.fromOffset(13,8),12,CL.white,true)
+    local bagText=text(bagCard,'0 / 50',UDim2.fromOffset(81,25),
+        UDim2.new(1,-91,0,8),13,CL.orange,true)
+    bagText.TextXAlignment=Enum.TextXAlignment.Right
+    local bar=box(bagCard,'Bar',UDim2.new(1,-26,0,9),UDim2.fromOffset(13,53),CL.off,5)
+    local barFill=box(bar,'Progress',UDim2.fromScale(0,1),UDim2.fromOffset(0,0),CL.violet,5)
+    local targetText=stat('FARM','Цель','Ожидание')
+    setting('SAFETY','Избегать убийцу','Выбирать безопасные конфеты',cfg.avoid,
+        function(v) cfg.avoid=v end)
+    setting('SAFETY','Антифлинг','Защита от резких толчков',cfg.antiFling,
+        function(v) cfg.antiFling=v end)
+    setting('SAFETY','Авторесет 50/50','Только после 50 подтверждений',cfg.reset50,
+        function(v) cfg.reset50=v end)
+    setting('SAFETY','Auto End Game · BETA','Физический режим после ресета',cfg.autoEnd,
+        function(v) cfg.autoEnd=v end)
+    setting('SAFETY','Anti AFK','Защита от отключения за бездействие',cfg.antiAFK,
+        function(v) cfg.antiAFK=v end)
+    local statBag=stat('STATS','Собрано за раунд','0 / 50')
+    local statTotal=stat('STATS','Всего в сессии','0')
+    local statChar=stat('STATS','Персонаж','Ожидание')
+    local statRound=stat('STATS','Раунд','Ожидание')
+    local statTime=stat('STATS','Время','0м 0с')
+    local function refreshBag()
+        local value=tostring(state.bag)..' / 50'
+        bagText.Text=value
+        statBag.Text=value
+        statTotal.Text=tostring(state.total)
+        barFill.Size=UDim2.new(math.clamp(state.bag/50,0,1),0,1,0)
+    end
 
-    -- Movement and game logic are kept separate from GUI setup.
-    local function ch() return player.Character end
+    local function character() return player.Character end
     local function root()
-        local c=ch()
-        if not c then return nil end
-        return c:FindFirstChild('HumanoidRootPart') or c:FindFirstChild('UpperTorso')
-            or c:FindFirstChild('Torso') or c.PrimaryPart
+        local c=character()
+        return c and (c:FindFirstChild('HumanoidRootPart')
+            or c:FindFirstChild('UpperTorso') or c:FindFirstChild('Torso') or c.PrimaryPart)
     end
     local function humanoid()
-        local c=ch()
+        local c=character()
         local h=c and c:FindFirstChildOfClass('Humanoid')
-        if not h or h.Health<=0 then return nil end
-        return h
+        return h and h.Health>0 and h or nil
+    end
+    local function restoreCollision()
+        for part, original in pairs(state.collision) do
+            if part and part.Parent then pcall(function() part.CanCollide=original end) end
+            state.collision[part]=nil
+        end
+        if state.rotHumanoid and state.rotHumanoid.Parent then
+            pcall(function() state.rotHumanoid.AutoRotate=state.originalRotate end)
+        end
+        state.rotHumanoid=nil
+    end
+    local function setNoClip()
+        local c=character()
+        if not c then return end
+        for _,p in ipairs(c:GetDescendants()) do
+            if p:IsA('BasePart') then
+                if state.collision[p]==nil then state.collision[p]=p.CanCollide end
+                p.CanCollide=false
+            end
+        end
+        local h=humanoid()
+        if h and state.rotHumanoid~=h then
+            state.rotHumanoid=h
+            state.originalRotate=h.AutoRotate
+            h.AutoRotate=false
+        end
     end
     local function stopMove()
         state.moving=false
-        if state.move then pcall(function() state.move:Cancel() end); state.move=nil end
-    end
-    local function stopFloat()
-        if state.float then pcall(function() state.float:Destroy() end) end
-        if state.attachment then pcall(function() state.attachment:Destroy() end) end
-        state.float=nil; state.attachment=nil
-    end
-    local function restoreCollision()
-        for part,old in pairs(state.collision) do
-            if part.Parent then pcall(function() part.CanCollide=old end) end
-            state.collision[part]=nil
-        end
+        state.currentTarget=nil
+        restoreCollision()
     end
     local function shutdown()
         if not state.alive then return end
-        state.alive=false; cfg.farm=false
-        stopMove(); stopFloat(); restoreCollision()
-        if state.spin then pcall(function() state.spin:Destroy() end) end
+        state.alive=false
+        cfg.farm=false
+        stopMove()
+        if state.spin and state.spin.Parent then pcall(function() state.spin:Destroy() end) end
         for _,c in ipairs(state.connections) do pcall(function() c:Disconnect() end) end
         if gui.Parent then gui:Destroy() end
-        if globalEnv and globalEnv.PHANTOM_MM2_SHUTDOWN==shutdown then
-            globalEnv.PHANTOM_MM2_SHUTDOWN=nil
-        end
+        if env and env.ATLANTA_V5_STOP==shutdown then env.ATLANTA_V5_STOP=nil end
     end
-    if globalEnv then globalEnv.PHANTOM_MM2_SHUTDOWN=shutdown end
-    close.MouseButton1Click:Connect(shutdown)
-    gui.Destroying:Connect(function()
-        if state.alive then shutdown() end
-    end)
+    if env then env.ATLANTA_V5_STOP=shutdown end
+    connect(closeBtn.MouseButton1Click,shutdown)
     connect(player.Idled,function()
-        if not state.alive or not cfg.antiAFK then return end
-        pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.zero) end)
+        if cfg.antiAFK and state.alive then
+            pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.zero) end)
+        end
     end)
-
-    -- Refresh all candy containers (supports morphs/maps and late insertion).
-    local containers, lastScan={}, -math.huge
-    local function candies()
-        local now=os.clock()
-        if now-lastScan>2 then
-            lastScan=now; containers={}
-            for _,d in ipairs(workspace:GetDescendants()) do
-                if d.Name=='CoinContainer' then containers[#containers+1]=d end
+    local collapsed=false
+    connect(minBtn.MouseButton1Click,function()
+        collapsed=not collapsed
+        minBtn.Text=collapsed and '+' or '−'
+        tabbar.Visible=not collapsed
+        hairline.Visible=not collapsed
+        footer.Visible=not collapsed
+        window.Size=UDim2.fromOffset(W,collapsed and 65 or H)
+        for key,page in pairs(pages) do
+            page.scroller.Visible=not collapsed and key==selected
+        end
+    end)
+    local movingWindow=false
+    local startedAt=nil
+    local originalPos=nil
+    connect(header.InputBegan,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or
+            input.UserInputType==Enum.UserInputType.Touch then
+            if input.Position.X<minBtn.AbsolutePosition.X-8 then
+                movingWindow=true
+                startedAt=input.Position
+                originalPos=window.Position
             end
         end
-        local result={}
-        for _,container in ipairs(containers) do
-            if container.Parent then
-                for _,d in ipairs(container:GetDescendants()) do
-                    if d:IsA('BasePart') and (d:FindFirstChild('TouchInterest') or
-                        (d.CanTouch and (d.Name:lower():find('coin') or d.Name:lower():find('candy')))) then
-                        result[#result+1]=d
+    end)
+    connect(UserInputService.InputChanged,function(input)
+        if movingWindow and startedAt and originalPos and
+            (input.UserInputType==Enum.UserInputType.MouseMovement or
+            input.UserInputType==Enum.UserInputType.Touch) then
+            local offset=input.Position-startedAt
+            window.Position=UDim2.new(originalPos.X.Scale,originalPos.X.Offset+offset.X,
+                originalPos.Y.Scale,originalPos.Y.Offset+offset.Y)
+        end
+    end)
+    connect(UserInputService.InputEnded,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or
+            input.UserInputType==Enum.UserInputType.Touch then movingWindow=false end
+    end)
+    local scale=make('UIScale',window,{Scale=1})
+    local function fit()
+        local cam=workspace.CurrentCamera
+        if cam then
+            local vp=cam.ViewportSize
+            scale.Scale=math.clamp(math.min((vp.X-20)/W,(vp.Y-20)/H),0.54,1)
+        end
+    end
+    fit()
+
+    -- Collectible discovery. Rescanning the whole workspace every 2 seconds was wasteful.
+    local containers={}
+    local lastScan=-math.huge
+    local function candies()
+        local now=os.clock()
+        if now-lastScan>(#containers==0 and 3 or 10) then
+            lastScan=now
+            containers={}
+            for _,o in ipairs(workspace:GetDescendants()) do
+                if o.Name=='CoinContainer' then containers[#containers+1]=o end
+            end
+        end
+        local results={}
+        for _,cont in ipairs(containers) do
+            if cont.Parent then
+                for _,p in ipairs(cont:GetDescendants()) do
+                    if p:IsA('BasePart') and p.CanTouch and
+                        (p:FindFirstChild('TouchInterest') or
+                         p.Name:lower():find('coin') or p.Name:lower():find('candy')) and
+                        not state.collected[p] and (state.ignored[p] or 0)<now then
+                        results[#results+1]=p
                     end
                 end
             end
         end
-        return result
+        return results
     end
-    local function knifeVisible(plr)
+
+    local function knifeEquipped(plr)
         local c=plr.Character
         if not c then return false end
         for _,item in ipairs(c:GetChildren()) do
@@ -447,292 +405,309 @@ local function boot()
         return false
     end
     local function murdererRoot()
-        if murderer and murderer~=player and murderer.Parent==Players then
-            local c=murderer.Character
-            local r=c and c:FindFirstChild('HumanoidRootPart')
+        local found=state.murderer
+        if found and found~=player and found.Parent==Players then
+            local c=found.Character
             local h=c and c:FindFirstChildOfClass('Humanoid')
-            if r and h and h.Health>0 then return r end
+            local rp=c and c:FindFirstChild('HumanoidRootPart')
+            if rp and h and h.Health>0 then return rp end
         end
-        for _,plr in ipairs(Players:GetPlayers()) do
-            if plr~=player and knifeVisible(plr) then
-                murderer=plr
-                return plr.Character and plr.Character:FindFirstChild('HumanoidRootPart')
+        for _,p in ipairs(Players:GetPlayers()) do
+            if p~=player and knifeEquipped(p) then
+                state.murderer=p
+                local c=p.Character
+                return c and c:FindFirstChild('HumanoidRootPart')
             end
         end
         return nil
     end
     task.spawn(function()
+        -- Role query is infrequent; never inside movement frames.
         while state.alive do
-            if cfg.farm and cfg.avoid then
-                local remote=ReplicatedStorage:FindFirstChild('Remotes')
-                remote=remote and remote:FindFirstChild('Extras')
-                remote=remote and remote:FindFirstChild('GetPlayerData')
-                if remote and remote:IsA('RemoteFunction') then
-                    local ok, data=pcall(function() return remote:InvokeServer() end)
+            if cfg.farm and cfg.avoid and state.round then
+                local rem=ReplicatedStorage:FindFirstChild('Remotes')
+                local ext=rem and rem:FindFirstChild('Extras')
+                local fn=ext and ext:FindFirstChild('GetPlayerData')
+                if fn and fn:IsA('RemoteFunction') then
+                    local ok,data=pcall(function() return fn:InvokeServer() end)
                     if ok and type(data)=='table' then
-                        local found=nil
                         for _,plr in ipairs(Players:GetPlayers()) do
                             local entry=data[plr.Name]
                             if plr~=player and type(entry)=='table' and
                                 tostring(entry.Role or ''):lower():find('murder') then
-                                found=plr; break
+                                state.murderer=plr
+                                break
                             end
                         end
-                        murderer=found
                     end
                 end
             end
-            task.wait(2.5)
+            task.wait(9)
         end
     end)
-    local function closestCandy(coins)
-        local hrp=root()
-        if not hrp then return nil end
-        local mr=cfg.avoid and murdererRoot() or nil
-        local danger=mr and (mr.Position-hrp.Position).Magnitude<43
-        local best,bestDist,bestScore=nil,math.huge,-math.huge
-        for _,coin in ipairs(coins) do
-            if coin.Parent and (state.ignored[coin] or 0)<os.clock() then
-                local d=(coin.Position-hrp.Position).Magnitude
-                local threat=mr and (coin.Position-mr.Position).Magnitude or math.huge
-                if threat>42 then
-                    if danger then
-                        -- Favor the safer opposite side, but still choose a real coin.
-                        local score=math.min(threat,210)-d*0.23
-                        if score>bestScore then best,bestDist,bestScore=coin,d,score end
-                    elseif d<bestDist then
-                        best,bestDist=coin,d
-                    end
+    local function nearestCandy(options)
+        local rp=root()
+        if not rp then return nil end
+        local threat=cfg.avoid and murdererRoot() or nil
+        local threatened=threat and (rp.Position-threat.Position).Magnitude<45
+        local best, score=nil,-math.huge
+        for _,coin in ipairs(options) do
+            if coin.Parent then
+                local distance=(coin.Position-rp.Position).Magnitude
+                local safety=threat and (coin.Position-threat.Position).Magnitude or math.huge
+                if safety>36 then
+                    local rank=threatened and (math.min(safety,190)-distance*0.3) or -distance
+                    if rank>score then best,score=coin,rank end
                 end
             end
         end
-        return best,bestDist
+        return best
     end
-    local function updateBag(count)
-        local old=bag
-        if typeof(count)=='number' and count>=0 and count<=50 then
-            bag=math.max(bag,math.floor(count))
-        else
-            bag=math.min(50,bag+1)
-        end
-        lifetime=lifetime+math.max(0,bag-old)
-        showBag()
+    local function newRound()
+        state.bag=0
+        state.ignored=setmetatable({}, {__mode='k'})
+        state.collected=setmetatable({}, {__mode='k'})
+        state.candidate=nil
+        state.candidateUntil=0
+        refreshBag()
     end
-    local function resetBag()
-        if not cfg.autoReset or bag<50 or state.resetting then return end
-        if os.clock()-lastReset<8 then return end
+    local function resetIfFull()
+        if not cfg.reset50 or state.bag<50 or state.resetting or not state.alive then return end
+        if os.clock()-state.cooldownReset<12 then return end
         local h=humanoid()
         if not h then return end
-        lastReset=os.clock(); state.resetting=true
-        targetLabel.Text='RESETTING'; status('BAG FULL / Reset','work')
-        stopMove(); stopFloat(); restoreCollision()
+        state.cooldownReset=os.clock()
+        state.resetting=true
+        status('МЕШОК ПОЛОН — РЕСЕТ',true)
+        stopMove()
         pcall(function() h.Health=0; h:ChangeState(Enum.HumanoidStateType.Dead) end)
-        task.delay(5,function()
-            if state.alive and state.resetting and humanoid()==h and h.Health>0 then
-                state.resetting=false; status('RESET / Blocked','warn')
+    end
+    local function pickupAcknowledged()
+        -- Never infer bag=50 from arbitrary remote parameters. One local pickup
+        -- confirmation only counts the current target, and only once.
+        local coin=state.candidate
+        if not coin or state.collected[coin] or os.clock()>state.candidateUntil or
+            state.resetting then return end
+        state.collected[coin]=true
+        state.ignored[coin]=math.huge
+        state.candidate=nil
+        state.bag=math.min(50,state.bag+1)
+        state.total=state.total+1
+        refreshBag()
+        resetIfFull()
+    end
+
+    local events={}
+    task.spawn(function()
+        while state.alive do
+            local rem=ReplicatedStorage:FindFirstChild('Remotes')
+            local gp=rem and rem:FindFirstChild('Gameplay')
+            if gp then
+                local function bind(name,fn)
+                    local event=gp:FindFirstChild(name)
+                    if event and event:IsA('RemoteEvent') and events[name]~=event then
+                        events[name]=event
+                        connect(event.OnClientEvent,fn)
+                    end
+                end
+                bind('CoinCollected',pickupAcknowledged)
+                bind('RoundStart',function()
+                    state.round=true
+                    state.murderer=nil
+                    newRound()
+                    statRound.Text='Идёт'
+                end)
+                bind('RoundEndFade',function()
+                    state.round=false
+                    state.lastRoundEnd=os.clock()
+                    state.murderer=nil
+                    state.candidate=nil
+                    stopMove()
+                    statRound.Text='Завершён'
+                end)
+            end
+            task.wait(3)
+        end
+    end)
+
+    local function endGameAttempt()
+        if not cfg.autoEnd or not cfg.farm or state.endGame or not state.alive then return end
+        local mr=murdererRoot()
+        local rp=root()
+        local h=humanoid()
+        if not mr or not rp or not h then return end
+        state.endGame=true
+        local ok,err=pcall(function()
+            local spin=make('BodyAngularVelocity',rp,{Name='ATLANTA_EndGame',
+                AngularVelocity=Vector3.new(0,820,0),
+                MaxTorque=Vector3.new(1e9,1e9,1e9),P=1e9})
+            state.spin=spin
+            local untilTime=os.clock()+1.1
+            while state.alive and cfg.autoEnd and os.clock()<untilTime and
+                rp.Parent and mr.Parent and h.Health>0 do
+                rp.CFrame=mr.CFrame*CFrame.new(0,0,2)
+                task.wait(0.05)
             end
         end)
-    end
-    local function roundHasCandy()
-        return roundActive or (#candies()>0 and os.clock()-lastRoundEnd>2)
-    end
-    local function attemptEndGame()
-        if not cfg.autoEnd or not cfg.farm or state.endGame or not roundHasCandy() then return end
-        local target=murdererRoot()
-        for _=1,8 do
-            if target or not state.alive then break end
-            task.wait(0.25); target=murdererRoot()
-        end
-        local rp=root(); local h=humanoid()
-        if not target or not rp or not h or rp==target then return end
-        state.endGame=true
-        stopMove(); stopFloat(); restoreCollision()
-        status('END GAME / Experimental','work')
-        local body=make('BodyAngularVelocity',{Name='PHANTOM_EndGameSpin',
-            AngularVelocity=Vector3.new(0,900,0),MaxTorque=Vector3.new(1e9,1e9,1e9),P=1e9},rp)
-        state.spin=body
-        local began=os.clock()
-        while state.alive and cfg.autoEnd and os.clock()-began<1.3
-            and rp.Parent and target.Parent and h.Health>0 and roundHasCandy() do
-            rp.CFrame=target.CFrame*CFrame.new(0,0,1.7)
-            task.wait(0.04)
-        end
-        pcall(function() body:Destroy() end)
-        state.spin=nil
+        if state.spin then pcall(function() state.spin:Destroy() end); state.spin=nil end
         if rp.Parent then
             rp.AssemblyAngularVelocity=Vector3.zero
             rp.AssemblyLinearVelocity=Vector3.zero
         end
         state.endGame=false
-        status('END GAME / Attempt finished','work')
+        if not ok then warn('[ATLANTA V5] End-game: '..tostring(err)) end
     end
     connect(player.CharacterAdded,function(model)
-        stopMove(); stopFloat(); restoreCollision()
-        local wasReset=state.resetting
+        stopMove()
+        local resetWasActive=state.resetting
         state.resetting=false
-        if wasReset then bag=0; showBag() end
+        state.candidate=nil
+        if resetWasActive then newRound() end
         task.spawn(function()
-            local h=model:WaitForChild('Humanoid',8)
-            local rp=model:WaitForChild('HumanoidRootPart',8)
-            if not h or not rp or not state.alive then return end
-            statChar.Text=model.Name:lower():find('zomb') and 'Zombie' or 'Ready'
-            if wasReset and cfg.autoEnd and cfg.farm then
-                task.wait(0.65)
-                if state.alive then attemptEndGame() end
+            local h=model:WaitForChild('Humanoid',9)
+            model:WaitForChild('HumanoidRootPart',9)
+            if not h or not state.alive then return end
+            statChar.Text=model.Name:lower():find('zomb') and 'Зомби' or 'Готов'
+            if resetWasActive and cfg.autoEnd and cfg.farm then
+                task.wait(0.75)
+                if state.alive then endGameAttempt() end
             end
         end)
     end)
-    local events={}
-    task.spawn(function()
-        while state.alive do
-            local remotes=ReplicatedStorage:FindFirstChild('Remotes')
-            local gp=remotes and remotes:FindFirstChild('Gameplay')
-            if gp then
-                local function hook(name,callback)
-                    local event=gp:FindFirstChild(name)
-                    if event and event:IsA('RemoteEvent') and events[name]~=event then
-                        events[name]=event
-                        connect(event.OnClientEvent,callback)
-                    end
-                end
-                hook('CoinCollected',function(a,b,c)
-                    local count=nil
-                    -- The first parameter can be nil or an Instance. Don't use
-                    -- ipairs here: it stops at the first nil and loses the count.
-                    for _,v in pairs({a,b,c}) do
-                        if typeof(v)=='number' and v>=0 and v<=50 then count=v end
-                    end
-                    updateBag(count)
-                    resetBag()
-                end)
-                hook('RoundStart',function()
-                    roundActive=true; murderer=nil
-                    bag=0; showBag(); statRound.Text='Active'
-                end)
-                hook('RoundEndFade',function()
-                    roundActive=false; lastRoundEnd=os.clock(); murderer=nil
-                    statRound.Text='Finished'; stopMove()
-                end)
-            end
-            task.wait(2)
-        end
-    end)
-    connect(RunService.Stepped,function()
-        if not state.alive then return end
-        local c=ch()
-        if cfg.farm and state.moving and not state.endGame and not state.resetting
-            and humanoid() and c then
-            for _,part in ipairs(c:GetDescendants()) do
-                if part:IsA('BasePart') then
-                    if state.collision[part]==nil then state.collision[part]=part.CanCollide end
-                    part.CanCollide=false
-                end
-            end
-        elseif next(state.collision) then
-            restoreCollision()
-        end
-    end)
-    connect(RunService.Heartbeat,function()
-        if not state.alive then return end
+
+    -- Straight, incremental travel. No Tween, VectorForce, BodyVelocity or upward hop.
+    local function flyTo(coin)
         local rp=root()
-        if cfg.farm and state.moving and not state.endGame and not state.resetting
-            and humanoid() and rp then
-            if not state.float or not state.attachment or state.attachment.Parent~=rp then
-                stopFloat()
-                state.attachment=make('Attachment',{Name='PHANTOM_FloatAttachment'},rp)
-                state.float=make('VectorForce',{Name='PHANTOM_Float',
-                    Attachment0=state.attachment,RelativeTo=Enum.ActuatorRelativeTo.World,
-                    ApplyAtCenterOfMass=true},rp)
+        if not rp or not humanoid() or not coin.Parent then return end
+        state.currentTarget=coin
+        state.candidate=nil
+        state.moving=true
+        setNoClip() -- Once per target instead of GetDescendants every frame.
+        local initialDistance=(rp.Position-(coin.Position+Vector3.new(0,1.2,0))).Magnitude
+        local deadline=os.clock()+math.clamp(initialDistance/math.max(cfg.speed,1)+2.5,2,26)
+        local last=os.clock()
+        local reached=false
+        local lastThreatCheck=0
+        while state.alive and cfg.farm and state.currentTarget==coin and not state.resetting
+            and not state.endGame and rp.Parent and root()==rp and humanoid()
+            and coin.Parent and os.clock()<deadline do
+            local now=os.clock()
+            local dt=math.clamp(now-last,0.015,0.09)
+            last=now
+            local target=coin.Position+Vector3.new(0,1.2,0)
+            local displacement=target-rp.Position
+            local gap=displacement.Magnitude
+            if gap<6 then
+                state.candidate=coin
+                state.candidateUntil=now+2
             end
-            state.float.Force=Vector3.new(0,rp.AssemblyMass*workspace.Gravity,0)
-        elseif state.float then stopFloat() end
-        if cfg.antiFling and rp and not state.endGame then
-            if rp.AssemblyLinearVelocity.Magnitude>math.max(145,cfg.speed*2+40) then
+            if state.collected[coin] then reached=true; break end
+            if cfg.avoid and now-lastThreatCheck>0.35 then
+                lastThreatCheck=now
+                local killer=murdererRoot()
+                if killer and ((killer.Position-rp.Position).Magnitude<23 or
+                    (killer.Position-coin.Position).Magnitude<30) then
+                    status('ОБХОД УБИЙЦЫ',true)
+                    break
+                end
+            end
+            if gap<=2.6 then
+                reached=true
+                -- Hold near candy briefly so a genuine CoinCollected event can arrive.
+                rp.CFrame=CFrame.new(target)
+                rp.AssemblyLinearVelocity=Vector3.zero
+                rp.AssemblyAngularVelocity=Vector3.zero
+                local hold=os.clock()+0.65
+                while state.alive and cfg.farm and coin.Parent and
+                    not state.collected[coin] and os.clock()<hold do
+                    task.wait(0.045)
+                end
+                break
+            end
+            local nextPos=rp.Position+displacement.Unit*math.min(gap,cfg.speed*dt)
+            local flat=Vector3.new(displacement.X,0,displacement.Z)
+            if flat.Magnitude>0.1 then
+                rp.CFrame=CFrame.lookAt(nextPos,nextPos+flat.Unit)
+            else
+                rp.CFrame=CFrame.new(nextPos)
+            end
+            rp.AssemblyLinearVelocity=Vector3.zero
+            rp.AssemblyAngularVelocity=Vector3.zero
+            task.wait(0.035)
+        end
+        if state.currentTarget==coin then
+            stopMove()
+            if not state.collected[coin] then
+                -- Do not return immediately to the same ghost/consumed coin.
+                state.ignored[coin]=reached and math.huge or (os.clock()+12)
+            end
+        end
+    end
+
+    connect(RunService.Heartbeat,function()
+        if not state.alive or not cfg.antiFling or state.moving or state.endGame then return end
+        local rp=root()
+        if rp and humanoid() then
+            if rp.AssemblyLinearVelocity.Magnitude>155 then
                 rp.AssemblyLinearVelocity=Vector3.zero
             end
-            if rp.AssemblyAngularVelocity.Magnitude>35 then
+            if rp.AssemblyAngularVelocity.Magnitude>48 then
                 rp.AssemblyAngularVelocity=Vector3.zero
             end
         end
     end)
     task.spawn(function()
         while state.alive do
-            local ok,err=pcall(function()
-                if cfg.farm and not state.resetting and not state.endGame and humanoid() then
-                    resetBag()
-                    local coins=candies()
-                    if #coins>0 and (roundActive or os.clock()-lastRoundEnd>2) then
-                        local coin,dist=closestCandy(coins)
-                        local rp=root()
-                        if coin and rp then
-                            targetLabel.Text='CANDY / Traveling'
-                            status('ACTIVE / Collecting','ok')
-                            statRound.Text='Active'
-                            local delta=coin.Position-rp.Position
-                            local flat=Vector3.new(delta.X,0,delta.Z)
-                            local goal=flat.Magnitude>0.01
-                                and CFrame.lookAt(coin.Position,coin.Position+flat.Unit)
-                                or CFrame.new(coin.Position)
-                            local duration=math.clamp(dist/math.max(cfg.speed,1),0.08,12)
-                            local move=TweenService:Create(rp,TweenInfo.new(duration,Enum.EasingStyle.Linear),{CFrame=goal})
-                            state.move=move; state.moving=true; move:Play()
-                            local began=os.clock()
-                            while state.alive and cfg.farm and state.move==move
-                                and not state.resetting and not state.endGame
-                                and root()==rp and coin.Parent and os.clock()-began<duration+0.5 do
-                                local gap=(rp.Position-coin.Position).Magnitude
-                                if gap<3.3 and not coin:FindFirstChild('TouchInterest') then break end
-                                if cfg.avoid then
-                                    local m=murdererRoot()
-                                    if m and ((m.Position-rp.Position).Magnitude<24
-                                        or (m.Position-coin.Position).Magnitude<36) then
-                                        targetLabel.Text='REROUTE / Threat'
-                                        status('DEFENSE / Evading','work')
-                                        break
-                                    end
-                                end
-                                task.wait(0.05)
+            if cfg.farm and not state.resetting and not state.endGame and humanoid() then
+                local ok,err=pcall(function()
+                    resetIfFull()
+                    if state.resetting then return end
+                    if state.round or os.clock()-state.lastRoundEnd>2 then
+                        local pool=candies()
+                        if #pool>0 then
+                            local coin=nearestCandy(pool)
+                            if coin then
+                                targetText.Text='Конфета'
+                                status('СБОР КОНФЕТ',true)
+                                flyTo(coin)
+                            else
+                                targetText.Text='Нет безопасных'
+                                status('ПОИСК БЕЗОПАСНОГО ПУТИ',false)
                             end
-                            if state.move==move then stopMove() end
-                            if coin.Parent then state.ignored[coin]=os.clock()+1.5 end
                         else
-                            targetLabel.Text='NO SAFE CANDY'
-                            status('DEFENSE / No safe target','work')
+                            targetText.Text='Ожидание конфет'
+                            status('ОЖИДАНИЕ КОНФЕТ',false)
                         end
-                    else
-                        targetLabel.Text='WAITING / Round'
-                        status('READY / Waiting','work')
                     end
-                else
-                    if not state.endGame then targetLabel.Text='STANDBY' end
+                end)
+                if not ok then
+                    stopMove()
+                    status('ОШИБКА — ПОВТОР',false)
+                    warn('[ATLANTA V5] Farm: '..tostring(err))
+                    task.wait(0.7)
                 end
-            end)
-            if not ok then
-                stopMove(); stopFloat()
-                warn('[PHANTOM V4] Farm error: '..tostring(err))
-                status('ERROR / Retrying','warn')
-                task.wait(0.6)
+            else
+                if state.moving then stopMove() end
+                if not state.resetting then targetText.Text='Ожидание' end
             end
-            task.wait(0.17)
+            task.wait(0.22)
         end
     end)
     task.spawn(function()
         while state.alive do
-            local seconds=math.floor(os.clock()-startTime)
-            statTime.Text=string.format('%dm %02ds',math.floor(seconds/60),seconds%60)
-            local model=ch()
-            if model then
-                statChar.Text=(model.Name:lower():find('zomb') or model:GetAttribute('Zombie'))
-                    and 'Zombie' or (humanoid() and 'Ready' or 'Respawning')
-            end
+            local seconds=math.floor(os.clock()-state.started)
+            statTime.Text=string.format('%dм %02dс',math.floor(seconds/60),seconds%60)
+            local c=character()
+            statChar.Text=not c and 'Нет персонажа' or
+                ((c.Name:lower():find('zomb') or c:GetAttribute('Zombie')) and 'Зомби' or
+                (humanoid() and 'Готов' or 'Возрождение'))
             task.wait(1)
         end
     end)
-    print('[PHANTOM V4] MENU CREATED / PHANTOM_MM2_V4 / ready')
+    print('[ATLANTA V5] MENU CREATED; candy counter requires pickup confirmation')
 end
 
-local ok,reason=pcall(boot)
+local ok,reason=pcall(start)
 if not ok then
-    warn('[PHANTOM V4] STARTUP FAILED: '..tostring(reason))
-    print('[PHANTOM V4] Please send the STARTUP FAILED line from executor console')
+    warn('[ATLANTA V5] STARTUP ERROR: '..tostring(reason))
 end
