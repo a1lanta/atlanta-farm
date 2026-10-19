@@ -1,1028 +1,784 @@
--- HALLOWEN MM2 V1.9 • Stable Startup Edition • @AtlantaRobuxShop
--- Standalone CLIENT UI for testing within a Roblox experience.
--- Works only to the extent permitted by the place / local runtime.
--- Does not claim server-confirmed coin collection, universal End Round or auto-injection after a crash.
+-- HALLOWEN MM2 v2.2 / fast proximity pickup + always-on Noclip
+-- Self-contained. No remote loadstring or external dependencies.
+-- Movement and pickups remain subject to Roblox/server validation.
 
-local __launchOk, __launchError = xpcall(function()
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
-local CollectionService = game:GetService("CollectionService")
-local PathfindingService = game:GetService("PathfindingService")
-local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
-local TextChatService = game:GetService("TextChatService")
-local TeleportService = game:GetService("TeleportService")
-local GuiService = game:GetService("GuiService")
-local VirtualUser = game:GetService("VirtualUser")
-local player = Players.LocalPlayer
-if not player then warn("HALLOWEN MM2 V1.9 must run on the client") return end
-local pg = player:WaitForChild("PlayerGui")
-local guiName = "HALLOWEN_MM2_V19"
-local current = pg:FindFirstChild(guiName)
-if current then
-    pcall(function() current:Destroy() end)
-end
-for _, oldName in ipairs({"HALLOWEN_MM2_V18","ATLANTA_FARM_V17","ATLANTA_FARM_V16","ATLANTA_FARM_V15","ATLANTA_FARM_V14","ATLANTA_FARM_V13","ATLANTA_FARM_V12","AtlantaFarmNoServerNotice"}) do
-    local old = pg:FindFirstChild(oldName)
-    if old then old:Destroy() end
-end
+local ok, err = xpcall(function()
+    local Players = game:GetService("Players")
+    local Workspace = game:GetService("Workspace")
+    local RunService = game:GetService("RunService")
+    local UserInputService = game:GetService("UserInputService")
+    local TweenService = game:GetService("TweenService")
+    local CollectionService = game:GetService("CollectionService")
+    local VirtualUser = game:GetService("VirtualUser")
 
-local BG = Color3.fromRGB(17,15,24)
-local CARD = Color3.fromRGB(29,25,37)
-local CARD2 = Color3.fromRGB(43,36,49)
-local ORANGE = Color3.fromRGB(242,154,82)
-local PURPLE = Color3.fromRGB(165,133,199)
-local LIGHT = Color3.fromRGB(242,238,246)
-local MUTED = Color3.fromRGB(172,163,183)
-local GOOD = Color3.fromRGB(146,220,170)
-local WARNING = Color3.fromRGB(245,124,113)
+    local player = Players.LocalPlayer
+    if not player then return end
+    local playerGui = player:WaitForChild("PlayerGui")
+    local guiName = "HALLOWEN_MM2_OPTIMIZED_V22"
 
-local state = {
-    active = false, speed = 10, antiFling = true, antiAfk = true,
-    noclip = false, airWalk = true, avoidMurderer = true, autoReset = false, autoRejoin = false,
-    visiting = false, visits = 0, candies = 0, coins = 0, failures = 0, resets = 0,
-    bag = "?", bagLimit = "?", status = "Готово · Hallowen MM2 готов", role = "Unknown",
-    currentTarget = nil, nearestDistance = 0
-}
-local alive = true
-local startedAt = os.clock()
-local token = 0
-local lastReset = -math.huge
-local resetPending = false
-local visited = setmetatable({}, {__mode="k"})
-local cachedCoins = setmetatable({}, {__mode="k"})
-local savedCollision = setmetatable({}, {__mode="k"})
-local savedOtherCollision = setmetatable({}, {__mode="k"})
-local listeners = {}
-local refresh
-local updateNoclip
-local updateAntiFling
-local targetHighlight
-local targetBillboard
-local lastAntiFlingSweep = 0
-local gui
-
-local function bind(signal, fn)
-    local c = signal:Connect(fn)
-    table.insert(listeners, c)
-    return c
-end
-local function charParts()
-    local char = player.Character
-    if not char then return nil end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if hum and root and hum.Health > 0 then return char,hum,root end
-    return nil
-end
-local function applySpeed()
-    -- Flight speed is controlled by state.speed; do not alter regular Roblox running.
-end
-local function isCoin(part)
-    if not part or not part:IsA("BasePart") then return false end
-    if CollectionService:HasTag(part,"AtlantaCoin") or part:GetAttribute("AtlantaCoin") == true then return true end
-    local function coinName(s)
-        s = string.lower(s)
-        return s == "coin" or s == "candy" or s == "green" or s == "purple" or s == "cyan" or s:find("coin",1,true) ~= nil
-            or s:find("candy",1,true) ~= nil or s:find("конфет",1,true) ~= nil
-            or s:find("монет",1,true) ~= nil
+    -- Running the script again safely removes earlier windows and their listeners.
+    for _,name in ipairs({
+        guiName, "HALLOWEN_MM2_OPTIMIZED_V21", "HALLOWEN_MM2_OPTIMIZED_V20", "HALLOWEN_MM2_V19", "HALLOWEN_MM2_V18",
+        "ATLANTA_FARM_V17", "ATLANTA_FARM_V16", "ATLANTA_FARM_V15"
+    }) do
+        local old = playerGui:FindFirstChild(name)
+        if old then pcall(function() old:Destroy() end) end
     end
-    if not coinName(part.Name) and not (part.Parent and coinName(part.Parent.Name)) then return false end
-    local parent = part.Parent
-    while parent and parent ~= Workspace do
-        if parent:IsA("Model") and parent:FindFirstChildOfClass("Humanoid") then return false end
-        parent = parent.Parent
+
+    -- Clean up ESP objects left by an older interrupted version.
+    for _,entry in ipairs({
+        {Workspace, "HalloweenMM2_CurrentTarget"},
+        {Workspace, "HalloweenMM2TargetESP"},
+        {playerGui, "HalloweenMM2_Nearest"},
+        {playerGui, "HalloweenMM2TargetLabel"}
+    }) do
+        local old=entry[1]:FindFirstChild(entry[2])
+        if old then pcall(function() old:Destroy() end) end
     end
-    return true
-end
-local function cacheCoin(part)
-    if isCoin(part) then cachedCoins[part] = true end
-end
-bind(Workspace.DescendantAdded, cacheCoin)
-bind(CollectionService:GetInstanceAddedSignal("AtlantaCoin"),cacheCoin)
--- Populate coin cache off the UI startup path; yield periodically on mobile.
-task.spawn(function()
-    local ok, items = pcall(function() return Workspace:GetDescendants() end)
-    if not ok or not items then return end
-    for i, obj in ipairs(items) do
+
+    local C = {
+        bg=Color3.fromRGB(17,15,24), card=Color3.fromRGB(29,25,37),
+        elevated=Color3.fromRGB(42,35,48), orange=Color3.fromRGB(246,151,67),
+        lilac=Color3.fromRGB(175,137,211), white=Color3.fromRGB(246,239,245),
+        muted=Color3.fromRGB(170,164,181), green=Color3.fromRGB(142,225,171),
+        red=Color3.fromRGB(255,122,122)
+    }
+    local settings = {
+        farm=false, speed=40, noclip=true,
+        antiAfk=true, antiFling=true, avoidMurderer=true,
+        visits=0, candies=0, coins=0, failures=0, disappearances=0,
+        target=nil, arrivedAt=nil, lastDistance=math.huge, lastProgressAt=0,
+        status="Готово · Noclip ON · фарм выключен"
+    }
+    local alive = true
+    local started = os.clock()
+    local connections = {}
+    local collectibles = setmetatable({}, {__mode="k"})
+    local visited = setmetatable({}, {__mode="k"})
+    local originalCollision = setmetatable({}, {__mode="k"})
+    local character, humanoid, root
+    local hoverAttachment, hoverForce
+    local nextScan, nextClip, nextUi, nextSafety = 0,0,0,0
+    local gui
+    local refresh
+    local setFarm
+    local heldSlider = false
+    local sliderTouch = nil
+    local dragging = false
+    local dragTouch, dragPosition, originalPanelPosition
+
+    local function connect(signal, fn)
+        local con=signal:Connect(fn)
+        connections[#connections+1]=con
+        return con
+    end
+    local function make(className, parent, props)
+        local inst=Instance.new(className)
+        for key,value in pairs(props or {}) do inst[key]=value end
+        inst.Parent=parent
+        return inst
+    end
+    local function radius(inst, px)
+        make("UICorner", inst, {CornerRadius=UDim.new(0,px)})
+    end
+    local function stroke(inst, color, transparency)
+        make("UIStroke", inst, {Color=color, Thickness=1, Transparency=transparency or 0})
+    end
+    local function label(parent, textValue, sz, color, bold)
+        return make("TextLabel",parent,{
+            BackgroundTransparency=1,Text=textValue,TextSize=sz or 12,
+            Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,
+            TextColor3=color or C.white,TextXAlignment=Enum.TextXAlignment.Left,
+            TextYAlignment=Enum.TextYAlignment.Center,
+            TextTruncate=Enum.TextTruncate.AtEnd,BorderSizePixel=0
+        })
+    end
+    local function primaryButton(parent, textValue, size)
+        local b=make("TextButton",parent,{
+            Text=textValue,TextColor3=C.white,TextSize=12,
+            Font=Enum.Font.GothamBold,BackgroundColor3=C.elevated,
+            BorderSizePixel=0,AutoButtonColor=false,
+            Size=size or UDim2.fromOffset(64,32)
+        })
+        radius(b,9)
+        return b
+    end
+    local function connectClick(btn, callback)
+        connect(btn.MouseButton1Click,callback)
+    end
+    local function setToggleText(btn, enabled)
+        btn.Text=enabled and "ON" or "OFF"
+        btn.TextColor3=enabled and C.green or C.muted
+        btn.BackgroundColor3=enabled and Color3.fromRGB(39,66,51) or C.elevated
+    end
+    local function card(parent, height)
+        local frame=make("Frame",parent,{
+            BackgroundColor3=C.card,BorderSizePixel=0,
+            Size=UDim2.new(1,-12,0,height)
+        })
+        radius(frame,11)
+        stroke(frame,C.lilac,0.89)
+        return frame
+    end
+    local function settingRow(parent, title, caption, height)
+        local f=card(parent,height or 72)
+        local heading=label(f,title,13,C.white,true)
+        heading.Position=UDim2.fromOffset(13,9)
+        heading.Size=UDim2.new(1,-103,0,22)
+        local sub=label(f,caption,10,C.muted,false)
+        sub.Position=UDim2.fromOffset(13,33)
+        sub.Size=UDim2.new(1,-103,0,22)
+        local b=primaryButton(f,"OFF")
+        b.AnchorPoint=Vector2.new(1,0.5)
+        b.Position=UDim2.new(1,-13,0.5,0)
+        return f,b,sub
+    end
+
+    -- Initialize the menu before starting the farming heartbeat.
+    gui=make("ScreenGui",playerGui,{
+        Name=guiName,ResetOnSpawn=false,IgnoreGuiInset=true,
+        ZIndexBehavior=Enum.ZIndexBehavior.Sibling,DisplayOrder=85
+    })
+    local launcher=primaryButton(gui,"🎃",UDim2.fromOffset(53,53))
+    launcher.Name="PumpkinLauncher"
+    launcher.TextSize=25
+    launcher.Position=UDim2.new(0,14,0.50,-26)
+    launcher.BackgroundColor3=Color3.fromRGB(78,47,78)
+    stroke(launcher,C.orange,0.15)
+    radius(launcher,14)
+
+    local panel=make("Frame",gui,{
+        Name="MainWindow",BackgroundColor3=C.bg,BorderSizePixel=0,
+        ClipsDescendants=true,Size=UDim2.fromOffset(372,490),
+        AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),
+        Visible=true
+    })
+    radius(panel,16)
+    stroke(panel,C.orange,0.38)
+    local scale=make("UIScale",panel,{Scale=1})
+    make("Frame",panel,{
+        BorderSizePixel=0,BackgroundColor3=C.orange,
+        Size=UDim2.new(1,0,0,3)
+    })
+    local header=make("Frame",panel,{
+        BackgroundTransparency=1,Size=UDim2.new(1,0,0,69),Active=true
+    })
+    local pumpkin=label(header,"🎃",25,C.orange,true)
+    pumpkin.Position=UDim2.fromOffset(14,11)
+    pumpkin.Size=UDim2.fromOffset(31,32)
+    local headerTitle=label(header,"HALLOWEN MM2",18,C.white,true)
+    headerTitle.Position=UDim2.fromOffset(49,9)
+    headerTitle.Size=UDim2.new(1,-126,0,28)
+    local telegram=label(header,"✈ TELEGRAM  @AtlantaRobuxShop",10,C.orange,true)
+    telegram.Position=UDim2.fromOffset(49,39)
+    telegram.Size=UDim2.new(1,-110,0,18)
+    local close=primaryButton(header,"✕",UDim2.fromOffset(31,31))
+    close.Position=UDim2.new(1,-43,0,18)
+    close.TextSize=18
+
+    local tabs=make("Frame",panel,{
+        BackgroundTransparency=1,Size=UDim2.new(1,-24,0,36),
+        Position=UDim2.fromOffset(12,74)
+    })
+    local tabButtons, pages={},{ }
+    for i, tabName in ipairs({"ФАРМ","ЗАЩИТА","СТАТИСТИКА"}) do
+        local b=primaryButton(tabs,tabName)
+        b.TextSize=11
+        b.Size=UDim2.new(1/3,-8,1,0)
+        b.Position=UDim2.new((i-1)/3,4,0,0)
+        tabButtons[i]=b
+        local page=make("ScrollingFrame",panel,{
+            Name="Tab"..i,Position=UDim2.fromOffset(11,119),
+            Size=UDim2.new(1,-22,1,-155),BorderSizePixel=0,
+            BackgroundTransparency=1,ScrollBarThickness=3,
+            ScrollBarImageColor3=C.orange,ScrollingDirection=Enum.ScrollingDirection.Y,
+            CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+            Visible=i==1
+        })
+        make("UIListLayout",page,{
+            FillDirection=Enum.FillDirection.Vertical,
+            SortOrder=Enum.SortOrder.LayoutOrder,
+            Padding=UDim.new(0,9),HorizontalAlignment=Enum.HorizontalAlignment.Center
+        })
+        make("UIPadding",page,{
+            PaddingTop=UDim.new(0,2),PaddingBottom=UDim.new(0,12)
+        })
+        pages[i]=page
+    end
+    local function showTab(index)
+        for i,b in ipairs(tabButtons) do
+            pages[i].Visible=(i==index)
+            b.BackgroundColor3=i==index and Color3.fromRGB(75,47,57) or C.card
+            b.TextColor3=i==index and C.orange or C.muted
+        end
+    end
+    for i,b in ipairs(tabButtons) do
+        connectClick(b,function() showTab(i) end)
+    end
+    showTab(1)
+
+    local footer=label(panel,"✈ TELEGRAM  •  @AtlantaRobuxShop  •  v2.2",10,C.muted,true)
+    footer.TextXAlignment=Enum.TextXAlignment.Center
+    footer.Position=UDim2.new(0,10,1,-30)
+    footer.Size=UDim2.new(1,-20,0,23)
+
+    local farmRow,farmBtn=settingRow(pages[1],"AUTO CANDY FARM","Ближайшая конфета → затем монеты")
+    local speedCard=card(pages[1],115)
+    local speedTitle=label(speedCard,"СКОРОСТЬ ПОЛЁТА",12,C.white,true)
+    speedTitle.Position=UDim2.fromOffset(13,7)
+    speedTitle.Size=UDim2.new(1,-100,0,23)
+    local speedBox=make("TextBox",speedCard,{
+        Text="40",TextSize=14,Font=Enum.Font.GothamBold,
+        TextColor3=C.orange,BackgroundColor3=C.elevated,
+        ClearTextOnFocus=false,BorderSizePixel=0,
+        Size=UDim2.fromOffset(55,28),Position=UDim2.new(1,-68,0,7)
+    })
+    radius(speedBox,8)
+    local track=make("Frame",speedCard,{
+        BorderSizePixel=0,BackgroundColor3=C.elevated,
+        Position=UDim2.fromOffset(15,55),Size=UDim2.new(1,-30,0,8),Active=true
+    })
+    radius(track,4)
+    local fill=make("Frame",track,{
+        BorderSizePixel=0,BackgroundColor3=C.orange,Size=UDim2.fromScale(39/99,1)
+    })
+    radius(fill,4)
+    local knob=make("Frame",track,{
+        BorderSizePixel=0,BackgroundColor3=C.white,Active=true,
+        AnchorPoint=Vector2.new(0.5,0.5),Size=UDim2.fromOffset(18,18),
+        Position=UDim2.fromScale(39/99,0.5)
+    })
+    radius(knob,9)
+    local speedSub=label(speedCard,"1  —  медленно                 100  —  быстро",10,C.muted)
+    speedSub.Position=UDim2.fromOffset(13,77)
+    speedSub.Size=UDim2.new(1,-26,0,21)
+
+    local avoidRow,avoidBtn=settingRow(pages[1],"ИЗБЕГАТЬ MURDERER","Если роль/оружие видны клиенту")
+    local noteRow=card(pages[1],72)
+    local noteText=label(noteRow,"Цель пересчитывается автоматически.\nСбор подтверждает только сервер игры.",11,C.muted)
+    noteText.TextWrapped=true
+    noteText.TextTruncate=Enum.TextTruncate.None
+    noteText.Position=UDim2.fromOffset(14,6)
+    noteText.Size=UDim2.new(1,-28,1,-12)
+
+    local antiRow,antiBtn=settingRow(pages[2],"ANTI-FLING","Ограничение резких толчков")
+    local afkRow,afkBtn=settingRow(pages[2],"ANTI-AFK","Попытка активности при простое")
+    local statsCard=card(pages[3],185)
+    local statsTitle=label(statsCard,"СТАТИСТИКА СЕССИИ",13,C.orange,true)
+    statsTitle.Position=UDim2.fromOffset(13,9)
+    statsTitle.Size=UDim2.new(1,-26,0,25)
+    local statsLines={}
+    for i=1,5 do
+        local ln=label(statsCard,"—",12,C.white,i==1)
+        ln.Position=UDim2.fromOffset(13,36+(i-1)*28)
+        ln.Size=UDim2.new(1,-26,0,24)
+        statsLines[i]=ln
+    end
+    local statusCard=card(pages[3],95)
+    local statusHead=label(statusCard,"СТАТУС",12,C.orange,true)
+    statusHead.Position=UDim2.fromOffset(13,7)
+    statusHead.Size=UDim2.new(1,-26,0,20)
+    local statusText=label(statusCard,settings.status,11,C.white)
+    statusText.TextWrapped=true
+    statusText.TextTruncate=Enum.TextTruncate.None
+    statusText.Position=UDim2.fromOffset(13,28)
+    statusText.Size=UDim2.new(1,-26,0,59)
+
+    local function speedUI()
+        local amount=math.clamp(settings.speed,1,100)
+        local ratio=(amount-1)/99
+        fill.Size=UDim2.fromScale(ratio,1)
+        knob.Position=UDim2.fromScale(ratio,0.5)
+        if not speedBox:IsFocused() then speedBox.Text=tostring(amount) end
+    end
+    refresh=function()
         if not alive then return end
-        if obj and obj.Parent then cacheCoin(obj) end
-        if i % 250 == 0 then task.wait() end
+        setToggleText(farmBtn,settings.farm)
+        setToggleText(avoidBtn,settings.avoidMurderer)
+        setToggleText(antiBtn,settings.antiFling)
+        setToggleText(afkBtn,settings.antiAfk)
+        speedUI()
+        statsLines[1].Text="Подлётов к целям: "..settings.visits
+        statsLines[2].Text="Целей исчезло рядом: "..settings.disappearances
+        statsLines[3].Text="Из них конфеты: "..settings.candies
+        statsLines[4].Text="Из них монеты: "..settings.coins
+        local seconds=math.floor(os.clock()-started)
+        statsLines[5].Text=string.format("Время: %02d:%02d:%02d",math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
+        statusText.Text=settings.status
     end
-end)
 
-local function visibleRole(plr)
-    local char=plr.Character
-    local role=plr:GetAttribute("AtlantaRole") or plr:GetAttribute("CurrentRole") or plr:GetAttribute("Role")
-        or (char and (char:GetAttribute("AtlantaRole") or char:GetAttribute("CurrentRole") or char:GetAttribute("Role")))
-    if type(role)~="string" then return "" end
-    return string.lower(role)
-end
-local function visibleKnife(plr)
-    local char=plr.Character
-    if not char then return false end
-    for _,obj in ipairs(char:GetChildren()) do
-        if obj:IsA("Tool") then
-            local name=string.lower(obj.Name)
-            if name == "knife" or name == "murderknife" then return true end
+    local function classify(part)
+        if not part or not part:IsA("BasePart") or not part.Parent then return nil end
+        if part==root or (character and part:IsDescendantOf(character)) then return nil end
+        if CollectionService:HasTag(part,"AtlantaCoin") or
+           CollectionService:HasTag(part,"Candy") or part:GetAttribute("AtlantaCoin")==true then
+            return "candy"
+        end
+        if CollectionService:HasTag(part,"Coin") then return "coin" end
+        local node=part
+        for _=1,4 do
+            if not node or node==Workspace then break end
+            local n=string.lower(node.Name)
+            if n:find("candy",1,true) or n:find("конфет",1,true)
+                or n=="green" or n=="purple" or n=="cyan" then
+                return "candy"
+            end
+            if n:find("coin",1,true) or n:find("монет",1,true) then
+                return "coin"
+            end
+            node=node.Parent
+        end
+        return nil
+    end
+    local function addPart(obj)
+        if not alive or not obj:IsA("BasePart") then return end
+        local kind=classify(obj)
+        if kind then collectibles[obj]=kind end
+    end
+    -- Initial scan is spread across frames to avoid freezing the game on a large map.
+    task.spawn(function()
+        local all=Workspace:GetDescendants()
+        for i,obj in ipairs(all) do
+            if not alive then break end
+            addPart(obj)
+            if i%350==0 then task.wait() end
+        end
+        all=nil
+    end)
+    connect(Workspace.DescendantAdded,addPart)
+    for _,tag in ipairs({"AtlantaCoin","Candy","Coin"}) do
+        connect(CollectionService:GetInstanceAddedSignal(tag),addPart)
+    end
+    -- Remove deleted parts promptly; weak tables then allow garbage collection.
+    connect(Workspace.DescendantRemoving,function(obj)
+        if not alive then return end
+        if settings.target==obj then
+            -- Disappearance near the player is a pickup *indicator*, not server proof.
+            if root and collectibles[obj] and (root.Position-obj.Position).Magnitude<3.6 then
+                settings.disappearances=settings.disappearances+1
+                if collectibles[obj]=="candy" then settings.candies=settings.candies+1
+                else settings.coins=settings.coins+1 end
+                settings.status="Цель исчезла рядом · ищу следующую · Noclip ON"
+            end
+            settings.target=nil
+            settings.arrivedAt=nil
+            settings.lastDistance=math.huge
+            nextScan=0
+        end
+        if collectibles[obj] then collectibles[obj]=nil;visited[obj]=nil end
+    end)
+
+    local function updateCharacter()
+        character=player.Character
+        humanoid=character and character:FindFirstChildOfClass("Humanoid") or nil
+        root=character and character:FindFirstChild("HumanoidRootPart") or nil
+        hoverForce=nil
+        hoverAttachment=nil
+        if character then
+            for part in pairs(originalCollision) do
+                if not part:IsDescendantOf(character) then originalCollision[part]=nil end
+            end
         end
     end
-    return false
-end
-local cachedThreats={}
-local lastThreatScan=-math.huge
-local function murderLocations()
-    local now=os.clock()
-    if now-lastThreatScan < 0.4 then return cachedThreats end
-    lastThreatScan=now
-    local places={}
-    for _,plr in ipairs(Players:GetPlayers()) do
-        if plr~=player and (visibleRole(plr)=="murderer" or visibleRole(plr)=="murder" or visibleKnife(plr)) then
-            local ch=plr.Character
-            local root=ch and ch:FindFirstChild("HumanoidRootPart")
-            local hum=ch and ch:FindFirstChildOfClass("Humanoid")
-            if root and hum and hum.Health>0 then table.insert(places,root.Position) end
+    updateCharacter()
+
+    local function ensureHover()
+        if not root or not root.Parent then return end
+        if hoverAttachment and hoverAttachment.Parent~=root then hoverAttachment=nil;hoverForce=nil end
+        if not hoverAttachment then
+            hoverAttachment=make("Attachment",root,{Name="HalloweenFloatAttachment"})
+            hoverForce=make("VectorForce",root,{
+                Name="HalloweenAntiGravity",Attachment0=hoverAttachment,
+                RelativeTo=Enum.ActuatorRelativeTo.World,
+                ApplyAtCenterOfMass=true
+            })
+        end
+        -- Counteracting gravity prevents continuous fall while Noclip is always ON.
+        hoverForce.Force=Vector3.new(0,root.AssemblyMass*Workspace.Gravity,0)
+        if not settings.farm then
+            -- Avoid drifting vertically after a flight is switched off.
+            local vel=root.AssemblyLinearVelocity
+            if math.abs(vel.Y)>3 then
+                root.AssemblyLinearVelocity=Vector3.new(vel.X,math.clamp(vel.Y,-3,3),vel.Z)
+            end
         end
     end
-    cachedThreats=places
-    return places
-end
-local function unsafeTarget(pos, points)
-    if not state.avoidMurderer or visibleRole(player)=="murderer" then return false end
-    for _,danger in ipairs(points or murderLocations()) do
-        if Vector2.new(pos.X-danger.X,pos.Z-danger.Z).Magnitude < 28 then return true end
-    end
-    return false
-end
--- Prioritize the closest candy. Ordinary coins are a fallback when no candy is available.
-local function isCandy(part)
-    local node=part
-    for _=1,4 do
-        if not node or node==Workspace then break end
-        local name=string.lower(node.Name)
-        if name:find("candy",1,true) or name:find("конфет",1,true)
-            or name=="green" or name=="purple" or name=="cyan" then
-            return true
-        end
-        node=node.Parent
-    end
-    return false
-end
-local function chooseCoin(root)
-    local bestCandy, bestCoin=nil,nil
-    local candyDist,coinDist=math.huge,math.huge
-    local threats=murderLocations()
-    local total,eligibleCandies=0,0
-    for part in pairs(cachedCoins) do
-        if part and part.Parent and part:IsDescendantOf(Workspace) and isCoin(part)
-            and os.clock()-(visited[part] or -100)>15 then
-            total+=1
-            local distance=(part.Position-root.Position).Magnitude
-            if distance<450 and not unsafeTarget(part.Position,threats) then
-                if isCandy(part) then
-                    eligibleCandies+=1
-                    if distance<candyDist then bestCandy,candyDist=part,distance end
-                elseif distance<coinDist then
-                    bestCoin,coinDist=part,distance
+    local function updateNoclip()
+        if not character or not character.Parent then return end
+        for _,obj in ipairs(character:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                if originalCollision[obj]==nil then originalCollision[obj]=obj.CanCollide end
+                if obj.CanCollide then obj.CanCollide=false end
+                -- Restore normal visibility after older script versions.
+                -- Do not reveal the naturally invisible HumanoidRootPart or hidden parts.
+                if obj.Name~="HumanoidRootPart" and obj.Transparency<1
+                    and obj.LocalTransparencyModifier~=0 then
+                    obj.LocalTransparencyModifier=0
                 end
             end
         end
+        ensureHover()
     end
-    return bestCandy or bestCoin,total,#threats>0, bestCandy~=nil,eligibleCandies
-end
-local function groundGoal(part,char)
-    local ray=RaycastParams.new()
-    ray.FilterType=Enum.RaycastFilterType.Exclude
-    ray.FilterDescendantsInstances={char,part}
-    ray.RespectCanCollide=true
-    local target=part.Position
-    local hit=Workspace:Raycast(target+Vector3.new(0,4,0), Vector3.new(0,-42,0),ray)
-    if hit then return Vector3.new(target.X,hit.Position.Y+2.8,target.Z) end
-    return target
-end
-local function clearLine(char,from,to)
-    local ray=RaycastParams.new()
-    ray.FilterType=Enum.RaycastFilterType.Exclude
-    ray.FilterDescendantsInstances={char}
-    ray.RespectCanCollide=true
-    return Workspace:Raycast(from,to-from,ray)==nil
-end
-local function routeTo(char,root,goal)
-    local path=PathfindingService:CreatePath({AgentRadius=2,AgentHeight=5,AgentCanJump=true,WaypointSpacing=4})
-    local ok=pcall(function() path:ComputeAsync(root.Position,goal) end)
-    if ok and path.Status == Enum.PathStatus.Success then
-        local waypoints=path:GetWaypoints()
-        if #waypoints>0 then return waypoints end
-    end
-    -- Direct walking only if the route is unobstructed. Never jump through a wall by CFrame.
-    if clearLine(char,root.Position+Vector3.new(0,1,0),goal+Vector3.new(0,1,0)) then
-        return {{Position=goal,Action=Enum.PathWaypointAction.Walk}}
-    end
-    return nil
-end
-local function waitForStep(part,waypoint,job)
-    local char,hum,root=charParts()
-    if not char then return false end
-    local goal=waypoint.Position
-    if waypoint.Action==Enum.PathWaypointAction.Jump then hum.Jump=true end
-    local prevDistance=(root.Position-goal).Magnitude
-    local lastProgress=os.clock()
-    local began=os.clock()
-    local lastCommand=-math.huge
-    local timeout=math.clamp(prevDistance/math.max(1,state.speed)*3+5,7,120)
-    while alive and state.active and job==token do
-        char,hum,root=charParts()
-        if not char then return false end
-        if not part or not part.Parent then return false end
-        if unsafeTarget(part.Position) then state.status="У монеты Murderer · ищу другую" return false end
-        local distance=(root.Position-goal).Magnitude
-        local toCoin=(root.Position-part.Position).Magnitude
-        if toCoin<5.2 then return true end
-        if distance<2.7 then return true end
-        if distance < prevDistance-0.6 then prevDistance=distance;lastProgress=os.clock() end
-        if os.clock()-lastProgress>2.8 or os.clock()-began>timeout then
-            state.status="Маршрут заблокирован · перестраиваю"
-            return false
+    local function restoreCollision()
+        for part,val in pairs(originalCollision) do
+            if part and part.Parent then pcall(function() part.CanCollide=val end) end
+            originalCollision[part]=nil
         end
-        if os.clock()-lastCommand>1.2 then
-            lastCommand=os.clock()
-            hum:MoveTo(goal)
-        end
-        task.wait(0.09)
+        if hoverAttachment then hoverAttachment:Destroy() end
+        if hoverForce then hoverForce:Destroy() end
+        hoverAttachment=nil;hoverForce=nil
     end
-    return false
-end
--- Constant-speed, straight-line Air Walk: no path replanning, teleport jumps or CFrame tweens.
--- The player's humanoid remains unanchored. Local server corrections can still occur.
-local function glideToCoin(part,job)
-    state.visiting=true
-    state.currentTarget=part
-    local arrived=false
-    local char,hum,root=charParts()
-    if char and part and part.Parent and not unsafeTarget(part.Position) then
-        local goal=part.Position+Vector3.new(0,0.7,0)
-        local oldAutoRotate=hum.AutoRotate
-        hum.AutoRotate=false
-        updateNoclip()
-        state.status="Air Walk → "..(isCandy(part) and "ближайшая конфета" or "монета")
-        while alive and state.active and state.airWalk and job==token do
-            char,hum,root=charParts()
-            if not char then break end
-            if not part or not part.Parent then
-                if root and (root.Position-goal).Magnitude<6 then arrived=true end
-                break
-            end
-            goal=part.Position+Vector3.new(0,0.7,0)
-            state.nearestDistance=math.floor((goal-root.Position).Magnitude+0.5)
-            if unsafeTarget(goal) or unsafeTarget(root.Position) then
-                state.status="Murderer рядом · меняю цель"
-                break
-            end
-            local vector=goal-root.Position
-            local distance=vector.Magnitude
-            if distance<=2.7 then
-                arrived=true
-                break
-            end
-            local dt=RunService.Heartbeat:Wait()
-            if not alive or job~=token or not state.active then break end
-            local length=math.min(distance, math.max(1,state.speed)*math.clamp(dt,0.001,0.05))
-            local nextPos=root.Position+vector.Unit*length
-            if unsafeTarget(nextPos) then
-                state.status="Murderer на маршруте · меняю цель"
-                break
-            end
-            local flat=Vector3.new(vector.X,0,vector.Z)
-            if flat.Magnitude>0.05 then
-                root.CFrame=CFrame.lookAt(nextPos,nextPos+flat.Unit)
-            else
-                root.CFrame=CFrame.new(nextPos)*root.CFrame.Rotation
-            end
-            root.AssemblyLinearVelocity=Vector3.zero
-            root.AssemblyAngularVelocity=Vector3.zero
-        end
-        if hum and hum.Parent then hum.AutoRotate=oldAutoRotate end
-    elseif part and part.Parent then
-        state.status="Murderer рядом с конфетой · пропускаю"
-    end
-    state.visiting=false
-    state.currentTarget=nil
-    state.nearestDistance=0
-    updateNoclip()
-    if arrived then
-        state.visits+=1
-        if isCandy(part) then state.candies+=1 else state.coins+=1 end
-        visited[part]=os.clock()
-        state.status=(isCandy(part) and "Конфета" or "Монета").." посещена · начисление проверяет игра"
-        task.wait(0.18)
-    else
-        state.failures+=1
-        if part then visited[part]=os.clock()-8 end
-    end
-    return arrived
-end
 
-local function walkToCoin(part,job)
-    state.visiting=true
-    state.currentTarget=part
-    local arrived=false
-    for attempt=1,3 do
-        if not alive or not state.active or job~=token or not part or not part.Parent then break end
-        local char,hum,root=charParts()
-        if not char then break end
-        if unsafeTarget(part.Position) then
-            state.status="Обхожу Murderer · обычные игроки не мешают"
-            break
-        end
-        local goal=groundGoal(part,char)
-        state.nearestDistance=math.floor((goal-root.Position).Magnitude+0.5)
-        local route=routeTo(char,root,goal)
-        if not route then
-            state.status="Нет безопасного пешего маршрута к монете"
-            break
-        end
-        state.status="Бегу к монете · маршрут "..tostring(attempt).."/3"
-        local routeOk=true
-        for index,waypoint in ipairs(route) do
-            if index>1 or #route==1 then
-                if not waitForStep(part,waypoint,job) then routeOk=false;break end
-            end
-            local _,_,newRoot=charParts()
-            if newRoot and (newRoot.Position-part.Position).Magnitude<5.2 then break end
-        end
-        local _,_,newRoot=charParts()
-        if newRoot and (newRoot.Position-part.Position).Magnitude<6.8 then
-            arrived=true
-            break
-        end
-        if routeOk then break end
-        task.wait(0.15)
-    end
-    state.visiting=false
-    state.currentTarget=nil
-    state.nearestDistance=0
-    if arrived then
-        state.visits+=1
-        if isCandy(part) then state.candies+=1 else state.coins+=1 end
-        visited[part]=os.clock()
-        state.status="Цель посещена · начисление проверяет игра"
-        task.wait(0.2)
-    else
-        state.failures+=1
-        visited[part]=os.clock()-8
-    end
-    return arrived
-end
-local function farmLoop(job)
-    while alive and state.active and job==token do
-        local _,hum,root=charParts()
-        if not root then
-            state.status="Ожидаю персонажа"
-            task.wait(0.5)
-        else
-            local coin,n,hasThreat,preferCandy,eligibleCandies=chooseCoin(root)
-            if coin then
-                if state.airWalk then glideToCoin(coin,job) else walkToCoin(coin,job) end
-                task.wait(0.13)
-            else
-                if n==0 then
-                    state.status="Конфеты и монеты не найдены в Workspace"
-                elseif eligibleCandies and eligibleCandies>0 then
-                    state.status="Жду ближайшую безопасную конфету"
-                elseif hasThreat then
-                    state.status="Жду цель подальше от Murderer"
-                else
-                    state.status="Нет доступных целей"
+    local dangerPositions={}
+    local nextDangerRefresh=0
+    local function collectDanger()
+        table.clear(dangerPositions)
+        if not settings.avoidMurderer then return end
+        for _,other in ipairs(Players:GetPlayers()) do
+            if other~=player then
+                local ch=other.Character
+                local name=other:GetAttribute("Role") or other:GetAttribute("AtlantaRole") or other:GetAttribute("CurrentRole")
+                if type(name)~="string" and ch then
+                    name=ch:GetAttribute("Role") or ch:GetAttribute("AtlantaRole") or ch:GetAttribute("CurrentRole")
                 end
-                task.wait(0.9)
-            end
-        end
-    end
-    state.visiting=false
-    local _,hum=charParts()
-    if hum then hum:MoveTo(hum.Parent:FindFirstChild("HumanoidRootPart") and hum.Parent.HumanoidRootPart.Position or hum.Parent:GetPivot().Position) end
-end
-
-updateNoclip=function()
-    local char=player.Character
-    if not char then return end
-    -- Air Walk temporarily enables noclip only during movement. Idle players keep floor collision.
-    local useNoclip=state.noclip or (state.active and state.airWalk and state.visiting)
-    for _,part in ipairs(char:GetDescendants()) do
-        if part:IsA("BasePart") then
-            if useNoclip then
-                if savedCollision[part]==nil then savedCollision[part]=part.CanCollide end
-                part.CanCollide=false
-                if part.Name~="HumanoidRootPart" then part.LocalTransparencyModifier=0.45 end
-            elseif savedCollision[part]~=nil then
-                part.CanCollide=savedCollision[part]
-                savedCollision[part]=nil
-                part.LocalTransparencyModifier=0
-            end
-        end
-    end
-end
-updateAntiFling=function(force)
-    -- Optimized sweep: avoid scanning every character each frame.
-    local now=os.clock()
-    if force or state.antiFling or next(savedOtherCollision)~=nil then
-        if force or now-lastAntiFlingSweep>1.1 then
-            lastAntiFlingSweep=now
-            for _,other in ipairs(Players:GetPlayers()) do
-                if other~=player and other.Character then
-                    for _,part in ipairs(other.Character:GetDescendants()) do
-                        if part:IsA("BasePart") then
-                            if state.antiFling then
-                                if savedOtherCollision[part]==nil then savedOtherCollision[part]=part.CanCollide end
-                                part.CanCollide=false
-                            elseif savedOtherCollision[part]~=nil then
-                                part.CanCollide=savedOtherCollision[part]
-                                savedOtherCollision[part]=nil
-                            end
+                local isMurder=type(name)=="string" and string.lower(name):find("murder",1,true)~=nil
+                if ch and not isMurder then
+                    for _,item in ipairs(ch:GetChildren()) do
+                        if item:IsA("Tool") then
+                            local itemName=string.lower(item.Name)
+                            if itemName=="knife" or itemName=="murderknife" then isMurder=true;break end
                         end
                     end
                 end
+                local rr=ch and ch:FindFirstChild("HumanoidRootPart")
+                if isMurder and rr then dangerPositions[#dangerPositions+1]=rr.Position end
             end
         end
     end
-    local _,_,root=charParts()
-    if state.antiFling and root then
-        local v=root.AssemblyLinearVelocity
-        local planar=Vector3.new(v.X,0,v.Z)
-        if planar.Magnitude>math.max(160,state.speed*3) then
-            root.AssemblyLinearVelocity=Vector3.new(0,math.clamp(v.Y,-80,80),0)
+    local function nearDanger(point, radius)
+        if not settings.avoidMurderer then return false end
+        local d=radius or 27
+        for _,pos in ipairs(dangerPositions) do
+            local dx=pos.X-point.X
+            local dz=pos.Z-point.Z
+            if dx*dx+dz*dz<d*d then return true end
         end
-        if root.AssemblyAngularVelocity.Magnitude>45 then
+        return false
+    end
+    local function chooseNearest()
+        if not root then return nil end
+        -- Threat lookup runs at most once every 0.6 sec; not on each target scan.
+        if os.clock()>=nextDangerRefresh then
+            nextDangerRefresh=os.clock()+0.60
+            collectDanger()
+        end
+        local origin=root.Position
+        local bestCandy,bestCoin
+        local candyD,coinD=math.huge,math.huge
+        local now=os.clock()
+        for part,kind in pairs(collectibles) do
+            if part.Parent and now-(visited[part] or -999)>4 then
+                local difference=part.Position-origin
+                local sq=difference:Dot(difference)
+                if sq<550*550 and not nearDanger(part.Position,27) then
+                    if kind=="candy" and sq<candyD then
+                        candyD=sq;bestCandy=part
+                    elseif kind=="coin" and sq<coinD then
+                        coinD=sq;bestCoin=part
+                    end
+                end
+            elseif not part.Parent then
+                collectibles[part]=nil
+                visited[part]=nil
+            end
+        end
+        return bestCandy or bestCoin
+    end
+
+    local function clearCurrentTarget()
+        settings.target=nil
+        settings.arrivedAt=nil
+        settings.lastDistance=math.huge
+        settings.lastProgressAt=os.clock()
+    end
+    local function setCurrentTarget(target)
+        settings.target=target
+        settings.arrivedAt=nil
+        settings.lastDistance=math.huge
+        settings.lastProgressAt=os.clock()
+        settings.status=collectibles[target]=="candy" and
+            "Лечу к ближайшей конфете · Noclip ON" or "Лечу к ближайшей монете · Noclip ON"
+    end
+    local function stopFlight()
+        if humanoid and humanoid.Parent then humanoid.AutoRotate=true end
+        clearCurrentTarget()
+        if root and root.Parent then
+            root.AssemblyLinearVelocity=Vector3.zero
             root.AssemblyAngularVelocity=Vector3.zero
         end
     end
-end
-local function send(action,value)
-    if action=="Speed" then
-        state.speed=math.clamp(math.floor((tonumber(value) or 10)+0.5),1,100)
-        applySpeed()
-        state.status=state.speed>16 and "Высокая скорость: возможны сбои и откат сервером" or "Скорость установлена: "..state.speed
-    elseif action=="ToggleFarm" then
-        state.active=not state.active
-        token+=1
-        if state.active then
-            state.status=state.airWalk and "Air Walk: лечу к ближайшей конфете" or "Ищу пеший маршрут"
-            local job=token
-            task.spawn(function() farmLoop(job) end)
+    setFarm=function(value)
+        settings.farm=not not value
+        if not settings.farm then
+            stopFlight()
+            settings.status="Фарм выключен · Noclip ON"
         else
-            state.status="Auto Farm выключен"
+            settings.status="Ищу ближайшую конфету · Noclip ON"
+            nextScan=0
         end
-    elseif action=="AirWalk" then
-        state.airWalk=not not value
-        token+=1
-        state.status=state.airWalk and "Air Walk ON · плавный полёт к ближайшей цели" or "Air Walk OFF · пеший маршрут"
-        if state.active then
-            local job=token
-            task.spawn(function() farmLoop(job) end)
+        refresh()
+    end
+    local function finishTarget(target, succeeded)
+        if target then
+            -- Failure gets a short delay. Completed (touched) targets get longer delay
+            -- so the character will seek new items instead of circling one decoration.
+            visited[target]=os.clock()-(succeeded and 0 or 2)
+            if not succeeded then settings.failures=settings.failures+1 end
         end
-    elseif action=="AntiFling" then
-        state.antiFling=not not value
-        updateAntiFling(true)
-        state.status=state.antiFling and "Anti-Fling ON · локальная защита" or "Anti-Fling OFF"
-    elseif action=="AntiAfk" then
-        state.antiAfk=not not value
-        state.status=state.antiAfk and "Anti-AFK ON · попытка активности при Idled" or "Anti-AFK OFF"
-    elseif action=="Noclip" then
-        state.noclip=not not value
-        updateNoclip()
-        state.status=state.noclip and "Noclip ON · ручной режим" or "Noclip OFF · Air Walk включает его только во время движения"
-    elseif action=="AvoidMurderer" then
-        state.avoidMurderer=not not value
-        state.status="Avoid Murderer "..(state.avoidMurderer and "ON" or "OFF")
-    elseif action=="AutoReset" then
-        state.autoReset=not not value
-        state.status=state.autoReset and "Auto Reset ON · нужны атрибуты мешка" or "Auto Reset OFF"
-    elseif action=="AutoRejoin" then
-        state.autoRejoin=not not value
-        state.status=state.autoRejoin and "Rejoin ON · только когда клиент ещё работает" or "Rejoin OFF"
-        if state.autoRejoin then
-            local q=queue_on_teleport
-            if type(q)~="function" and type(syn)=="table" then q=syn.queue_on_teleport end
-            if type(q)=="function" then pcall(q,'loadstring(game:HttpGet("https://raw.githubusercontent.com/a1lanta/atlanta-farm/main/ATLANTA_FARM_ExecutorClient.lua"))()') end
+        clearCurrentTarget()
+        if succeeded then
+            settings.status="Контакт с целью · ищу следующую · Noclip ON"
         end
-    elseif action=="EndRound" then
-        state.status="End Round недоступен без API сервера этой игры"
+        nextScan=0
     end
-    if refresh then refresh() end
-end
-
-local function ui(kind, props, parent)
-    local obj=Instance.new(kind)
-    for key,value in pairs(props or {}) do obj[key]=value end
-    if parent then obj.Parent=parent end
-    return obj
-end
-local function round(obj,r)
-    ui("UICorner",{CornerRadius=UDim.new(0,r or 10)},obj)
-    return obj
-end
-local function border(obj,color,trans)
-    ui("UIStroke",{Color=color or ORANGE,Transparency=trans or 0.75,Thickness=1},obj)
-end
-local function tween(obj,time,goal)
-    local t=TweenService:Create(obj,TweenInfo.new(time,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),goal)
-    t:Play()
-    return t
-end
-local function updateTargetESP()
-    if not targetHighlight then
-        targetHighlight=Instance.new("Highlight")
-        targetHighlight.Name="HalloweenMM2TargetESP"
-        targetHighlight.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
-        targetHighlight.FillColor=ORANGE
-        targetHighlight.OutlineColor=PURPLE
-        targetHighlight.FillTransparency=0.2
-        targetHighlight.OutlineTransparency=0
-        targetHighlight.Enabled=false
-        targetHighlight.Parent=gui
-    end
-    if not targetBillboard then
-        targetBillboard=Instance.new("BillboardGui")
-        targetBillboard.Name="HalloweenMM2TargetLabel"
-        targetBillboard.Size=UDim2.fromOffset(150,34)
-        targetBillboard.StudsOffset=Vector3.new(0,2.8,0)
-        targetBillboard.AlwaysOnTop=true
-        targetBillboard.Enabled=false
-        targetBillboard.Parent=gui
-        local bg=Instance.new("Frame")
-        bg.Name="BG"
-        bg.Size=UDim2.fromScale(1,1)
-        bg.BackgroundColor3=BG
-        bg.BackgroundTransparency=0.18
-        bg.BorderSizePixel=0
-        bg.Parent=targetBillboard
-        round(bg,8)
-        border(bg,ORANGE,0.15)
-        local lbl=Instance.new("TextLabel")
-        lbl.Name="Text"
-        lbl.BackgroundTransparency=1
-        lbl.Size=UDim2.new(1,-8,1,-4)
-        lbl.Position=UDim2.fromOffset(4,2)
-        lbl.Font=Enum.Font.GothamBold
-        lbl.TextColor3=LIGHT
-        lbl.TextScaled=true
-        lbl.Text="TARGET"
-        lbl.Parent=bg
-    end
-    local target=state.currentTarget
-    if target and target.Parent and target:IsA("BasePart") then
-        targetHighlight.Adornee=target
-        targetHighlight.Enabled=true
-        targetBillboard.Adornee=target
-        targetBillboard.Enabled=true
-        local lbl=targetBillboard.BG.Text
-        lbl.Text=(isCandy(target) and "🎃 NEAREST CANDY" or "COIN").." · "..tostring(state.nearestDistance or 0).."m"
-    else
-        targetHighlight.Enabled=false
-        targetHighlight.Adornee=nil
-        targetBillboard.Enabled=false
-        targetBillboard.Adornee=nil
-    end
-end
-local function text(parent,s,x,y,w,h,size,color,bold)
-    return ui("TextLabel",{
-        BackgroundTransparency=1,Text=s,Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,
-        TextSize=size or 12,TextColor3=color or LIGHT,TextXAlignment=Enum.TextXAlignment.Left,
-        TextYAlignment=Enum.TextYAlignment.Center,TextTruncate=Enum.TextTruncate.AtEnd,
-        Position=UDim2.new(0,x,0,y),Size=UDim2.new(1,w,0,h),
-    },parent)
-end
-local function button(parent,label,x,y,w,h)
-    local b=ui("TextButton",{
-        Text=label,BackgroundColor3=CARD2,TextColor3=LIGHT,Font=Enum.Font.GothamBold,
-        TextSize=12,Size=UDim2.fromOffset(w,h),Position=UDim2.new(1,x,0,y),
-        BorderSizePixel=0,AutoButtonColor=false,
-    },parent)
-    round(b,9)
-    bind(b.MouseEnter,function() tween(b,0.15,{BackgroundColor3=Color3.fromRGB(66,47,64)}) end)
-    bind(b.MouseLeave,function() tween(b,0.15,{BackgroundColor3=CARD2}) end)
-    return b
-end
-local function card(parent,h)
-    local item=ui("Frame",{BackgroundColor3=CARD,Size=UDim2.new(1,-16,0,h),BorderSizePixel=0,ClipsDescendants=true},parent)
-    round(item,11)
-    border(item,PURPLE,0.9)
-    return item
-end
-gui=ui("ScreenGui",{Name=guiName,ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=60},pg)
-local opener=ui("TextButton",{
-    Name="HalloweenLauncher",Text="🎃",Font=Enum.Font.GothamBlack,TextSize=23,TextColor3=LIGHT,
-    BackgroundColor3=Color3.fromRGB(91,55,83),BorderSizePixel=0,
-    Size=UDim2.fromOffset(54,54),Position=UDim2.new(0,16,0.48,0),AutoButtonColor=false,
-},gui)
-round(opener,16)
-border(opener,ORANGE,0.2)
-local panel=ui("Frame",{
-    Name="MainWindow",BackgroundColor3=BG,BorderSizePixel=0,ClipsDescendants=true,
-    Size=UDim2.fromOffset(372,534),AnchorPoint=Vector2.new(0.5,0.5),
-    Position=UDim2.fromScale(0.5,0.5),Visible=false,
-},gui)
-round(panel,16)
-border(panel,ORANGE,0.40)
-local scale=ui("UIScale",{Scale=1},panel)
-local strip=ui("Frame",{BackgroundColor3=ORANGE,BorderSizePixel=0,Size=UDim2.new(1,0,0,3)},panel)
-local header=ui("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,72),Active=true},panel)
-text(header,"🎃",14,12,-330,34,24,ORANGE,true).Size=UDim2.fromOffset(30,30)
-text(header,"HALLOWEN MM2",50,10,-140,28,19,LIGHT,true)
-text(header,"✈ TELEGRAM  @AtlantaRobuxShop",50,40,-140,18,10,ORANGE,false)
-local close=button(header,"✕",-46,15,32,32)
-local tabs=ui("Frame",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,74),Size=UDim2.new(1,-24,0,38)},panel)
-local tabNames={"ФАРМ","ЗАЩИТА","СТАТИСТИКА"}
-local tabButtons={}
-local pages={}
-for i,name in ipairs(tabNames) do
-    local b=ui("TextButton",{
-        BackgroundColor3=(i==1 and Color3.fromRGB(79,50,60) or CARD),BorderSizePixel=0,
-        Position=UDim2.new((i-1)/3,4,0,0),Size=UDim2.new(1/3,-8,1,0),
-        Text=name,TextSize=11,Font=Enum.Font.GothamBold,
-        TextColor3=(i==1 and ORANGE or MUTED),AutoButtonColor=false,
-    },tabs)
-    round(b,9)
-    tabButtons[i]=b
-    local page=ui("ScrollingFrame",{
-        Name="Page"..i,BackgroundTransparency=1,BorderSizePixel=0,
-        Position=UDim2.fromOffset(10,118),Size=UDim2.new(1,-20,1,-156),
-        ScrollBarThickness=3,ScrollBarImageColor3=ORANGE,
-        AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.new(),
-        ScrollingDirection=Enum.ScrollingDirection.Y,Visible=(i==1),
-    },panel)
-    ui("UIListLayout",{Padding=UDim.new(0,9),SortOrder=Enum.SortOrder.LayoutOrder,HorizontalAlignment=Enum.HorizontalAlignment.Center},page)
-    ui("UIPadding",{PaddingBottom=UDim.new(0,12)},page)
-    pages[i]=page
-end
-local function showTab(idx)
-    for i,pgPage in ipairs(pages) do
-        pgPage.Visible=(i==idx)
-        tween(tabButtons[i],0.15,{
-            BackgroundColor3=(i==idx and Color3.fromRGB(79,50,60) or CARD),
-            TextColor3=(i==idx and ORANGE or MUTED),
-        })
-    end
-end
-for i,b in ipairs(tabButtons) do bind(b.MouseButton1Click,function() showTab(i) end) end
-local foot=ui("TextLabel",{
-    BackgroundTransparency=1,Text="✈ TELEGRAM  •  @AtlantaRobuxShop",Font=Enum.Font.GothamBold,
-    TextSize=10,TextColor3=MUTED,Position=UDim2.new(0,12,1,-30),Size=UDim2.new(1,-24,0,24)
-},panel)
-
--- Farm page: no fake flight speed control. Character speed is EXACTLY 1..100.
-local farmCard=card(pages[1],72)
-text(farmCard,"AUTO CANDY FARM",12,8,-98,24,14,LIGHT,true)
-text(farmCard,"Ближайшие конфеты → затем монеты",12,35,-84,23,10,MUTED)
-local farmBtn=button(farmCard,"OFF",-77,19,64,32)
-local airRow=card(pages[1],65)
-text(airRow,"AIR WALK",12,6,-93,24,13,LIGHT,true)
-text(airRow,"Плавный полёт к ближайшей конфете с поворотом",12,31,-82,20,10,MUTED)
-local airBtn=button(airRow,"ON",-77,15,64,32)
-local speedCard=card(pages[1],132)
-text(speedCard,"СКОРОСТЬ ПОЛЁТА",12,6,-110,24,12,LIGHT,true)
-local speedInput=ui("TextBox",{
-    BackgroundColor3=CARD2,BorderSizePixel=0,Font=Enum.Font.GothamBold,TextSize=15,
-    TextColor3=ORANGE,Text="10",ClearTextOnFocus=false,
-    Position=UDim2.new(1,-72,0,8),Size=UDim2.fromOffset(60,28),
-},speedCard)
-round(speedInput,8)
-local speedBar=ui("Frame",{
-    BackgroundColor3=CARD2,BorderSizePixel=0,Active=true,
-    Position=UDim2.new(0,14,0,57),Size=UDim2.new(1,-28,0,9),
-},speedCard)
-round(speedBar,5)
-local speedFill=ui("Frame",{BackgroundColor3=ORANGE,BorderSizePixel=0,Size=UDim2.fromScale(0,1)},speedBar)
-round(speedFill,5)
-local speedKnob=ui("Frame",{
-    BackgroundColor3=LIGHT,BorderSizePixel=0,Active=true,
-    AnchorPoint=Vector2.new(0.5,0.5),Size=UDim2.fromOffset(20,20),Position=UDim2.fromScale(0,0.5),
-},speedBar)
-round(speedKnob,11)
-text(speedCard,"1 — медленно     •     16 — обычно     •     100 — быстро",12,77,-24,18,10,MUTED)
-local speedWarn=text(speedCard,"⚠ Более 16 — возможны откаты и проблемы движения",12,103,-24,18,10,WARNING)
-local safeRow=card(pages[1],65)
-text(safeRow,"ИЗБЕГАТЬ MURDERER",12,6,-93,24,13,LIGHT,true)
-text(safeRow,"Обычные игроки не блокируют монеты",12,31,-82,20,10,MUTED)
-local safeBtn=button(safeRow,"ON",-77,15,64,32)
-local resetRow=card(pages[1],65)
-text(resetRow,"AUTO RESET",12,6,-93,24,13,LIGHT,true)
-text(resetRow,"При полном мешке, если счётчик доступен",12,31,-88,20,10,MUTED)
-local resetBtn=button(resetRow,"OFF",-77,15,64,32)
-local rejoinRow=card(pages[1],65)
-text(rejoinRow,"AUTO REJOIN",12,6,-93,24,13,LIGHT,true)
-text(rejoinRow,"Попытка входа при ошибке соединения",12,31,-88,20,10,MUTED)
-local rejoinBtn=button(rejoinRow,"OFF",-77,15,64,32)
-local endRow=card(pages[1],58)
-text(endRow,"END ROUND",12,7,-100,24,13,LIGHT,true)
-text(endRow,"Для реального завершения нужен серверный API",12,32,-95,17,10,MUTED)
-local endBtn=button(endRow,"END",-77,14,64,32)
-
--- Protection tab: all requested switches visible immediately, not buried below stats.
-local antiCard=card(pages[2],82)
-text(antiCard,"ANTI FLING",12,7,-94,24,14,LIGHT,true)
-text(antiCard,"Снижает толчки и резкие вращения",12,32,-80,19,11,MUTED)
-text(antiCard,"Локальная защита, не от любого оружия",12,51,-25,17,10,ORANGE)
-local antiBtn=button(antiCard,"ON",-77,20,64,33)
-local afkCard=card(pages[2],82)
-text(afkCard,"ANTI-AFK",12,7,-94,24,14,LIGHT,true)
-text(afkCard,"Пробует отправить действие при Idled",12,32,-80,19,11,MUTED)
-text(afkCard,"Зависит от клиента Roblox",12,51,-25,17,10,ORANGE)
-local afkBtn=button(afkCard,"ON",-77,20,64,33)
-local noclipCard=card(pages[2],82)
-text(noclipCard,"NOCLIP",12,7,-94,24,14,LIGHT,true)
-text(noclipCard,"Air Walk сам включает Noclip на время движения",12,32,-80,19,11,MUTED)
-text(noclipCard,"Здесь — ручной Noclip вне фарма (риск падения)",12,51,-25,17,10,WARNING)
-local noclipBtn=button(noclipCard,"OFF",-77,20,64,33)
-local tips=card(pages[2],80)
-text(tips,"ЗАЩИТА ОТ ЗАСТРЕВАНИЯ",12,6,-24,24,12,LIGHT,true)
-text(tips,"Air Walk: плавный полёт к ближайшей цели без бега.",12,31,-24,19,11,MUTED)
-text(tips,"ESP показывает текущую ближайшую цель.",12,51,-24,19,10,MUTED)
-
--- Statistics tab: client visits are NOT server-confirmed money.
-local statRow=card(pages[3],150)
-text(statRow,"АНАЛИТИКА СЕССИИ",12,6,-24,22,13,LIGHT,true)
-local statVisits=text(statRow,"Посещено монет: 0",12,33,-24,22,13,ORANGE,true)
-local statCandies=text(statRow,"Конфет посещено: 0",12,60,-24,21,12,LIGHT)
-local statFail=text(statRow,"Неудачных маршрутов: 0",12,87,-24,21,12,LIGHT)
-local statTime=text(statRow,"Время: 00:00:00",12,114,-24,21,12,MUTED)
-local statBag=card(pages[3],67)
-local bagValue=text(statBag,"Мешок: ? / ?",12,8,-24,25,13,LIGHT,true)
-text(statBag,"Если игра не раскрывает счётчик, будет ?",12,37,-24,20,10,MUTED)
-local statRole=card(pages[3],67)
-local roleValue=text(statRole,"Роль: Unknown",12,8,-24,24,13,LIGHT,true)
-text(statRole,"Обнаружение убийцы зависит от видимых данных",12,37,-24,20,10,MUTED)
-local statusCard=card(pages[3],88)
-text(statusCard,"СТАТУС",12,6,-24,20,11,ORANGE,true)
-local statusText=text(statusCard,"Готово",12,30,-24,50,12,LIGHT)
-statusText.TextWrapped=true
-statusText.TextTruncate=Enum.TextTruncate.None
-
-local function setButton(btn,on)
-    btn.Text=on and "ON" or "OFF"
-    btn.TextColor3=on and GOOD or LIGHT
-end
-local function showSpeed()
-    local ratio=(state.speed-1)/99
-    speedFill.Size=UDim2.fromScale(ratio,1)
-    speedKnob.Position=UDim2.fromScale(ratio,0.5)
-    if not speedInput:IsFocused() then speedInput.Text=tostring(state.speed) end
-    speedInput.TextColor3=(state.speed>16) and WARNING or ORANGE
-    speedWarn.Visible=state.speed>16
-end
-refresh=function()
-    setButton(farmBtn,state.active)
-    setButton(airBtn,state.airWalk)
-    setButton(safeBtn,state.avoidMurderer)
-    setButton(resetBtn,state.autoReset)
-    setButton(rejoinBtn,state.autoRejoin)
-    setButton(antiBtn,state.antiFling)
-    setButton(afkBtn,state.antiAfk)
-    setButton(noclipBtn,state.noclip)
-    showSpeed()
-    statVisits.Text="Всего посещено: "..state.visits
-    statCandies.Text="Конфет посещено: "..state.candies
-    statFail.Text="Неудачных маршрутов: "..state.failures
-    local seconds=math.max(0,math.floor(os.clock()-startedAt))
-    statTime.Text=string.format("Время: %02d:%02d:%02d",math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
-    bagValue.Text="Мешок: "..tostring(state.bag).." / "..tostring(state.bagLimit)
-    roleValue.Text="Роль: "..tostring(state.role)
-    statusText.Text=tostring(state.status)
-    if not state.espFault then
-        local ok,err=pcall(updateTargetESP)
-        if not ok then
-            state.espFault=true
-            warn("Hallowen MM2 ESP disabled: "..tostring(err))
+    -- Some executors expose firetouchinterest. Optional only: do not depend on it.
+    -- Never call unknown game remotes or execute external code.
+    local lastTouchAttempt=0
+    local function tryClientTouch(target)
+        if not root or not target or not target.Parent then return end
+        local fn=firetouchinterest
+        if type(fn)=="function" and os.clock()-lastTouchAttempt>0.12 then
+            lastTouchAttempt=os.clock()
+            pcall(function()
+                fn(root,target,0)
+                fn(root,target,1)
+            end)
         end
     end
-end
+    local function updateFlight(dt)
+        if not settings.farm then return end
+        if not character or not humanoid or not root or humanoid.Health<=0 then
+            clearCurrentTarget()
+            settings.status="Ожидаю нового раунда · Noclip ON"
+            return
+        end
+        local target=settings.target
+        if not target then return end
+        if not target.Parent or not target:IsDescendantOf(Workspace) then
+            -- The removal event can already have counted this disappearance.
+            finishTarget(target,true)
+            return
+        end
+        if nearDanger(target.Position,25) or nearDanger(root.Position,15) then
+            settings.status="Murderer рядом · меняю цель · Noclip ON"
+            finishTarget(target,false)
+            return
+        end
+        -- Fly into the actual part, rather than stopping 2.8 studs away.
+        -- This increases the chance of the game's Touched / proximity logic firing.
+        local goal=target.Position+Vector3.new(0,0.14,0)
+        local vector=goal-root.Position
+        local distance=vector.Magnitude
+        if distance<=0.72 then
+            if not settings.arrivedAt then
+                settings.arrivedAt=os.clock()
+                settings.visits=settings.visits+1
+                settings.status=collectibles[target]=="candy" and
+                    "Касаюсь конфеты · Noclip ON" or "Касаюсь монеты · Noclip ON"
+            end
+            tryClientTouch(target)
+            -- Stay briefly at the part so collision / pickup scripts can react.
+            if os.clock()-settings.arrivedAt>=0.27 then
+                finishTarget(target,true)
+            end
+            return
+        end
+        -- Detect repeated server corrections that make the player appear stuck.
+        if distance < settings.lastDistance-0.24 then
+            settings.lastDistance=distance
+            settings.lastProgressAt=os.clock()
+        elseif os.clock()-settings.lastProgressAt>1.6 then
+            settings.status="Не могу приблизиться · меняю цель · Noclip ON"
+            finishTarget(target,false)
+            return
+        end
+        local delta=math.max(0.001,math.min(dt,0.05))
+        local move=math.min(distance,settings.speed*delta)
+        local nextPosition=root.Position+vector.Unit*move
+        local flat=Vector3.new(vector.X,0,vector.Z)
+        humanoid.AutoRotate=false
+        if flat.Magnitude>0.08 then
+            root.CFrame=CFrame.lookAt(nextPosition,nextPosition+flat.Unit)
+        else
+            root.CFrame=CFrame.new(nextPosition)*root.CFrame.Rotation
+        end
+        root.AssemblyLinearVelocity=Vector3.zero
+        root.AssemblyAngularVelocity=Vector3.zero
+    end
 
--- Smooth responsive opening, with a small clickable launcher on mobile.
-local isOpen=false
-local function targetScale()
-    local cam=Workspace.CurrentCamera
-    local s=cam and cam.ViewportSize or Vector2.new(400,750)
-    return math.clamp(math.min((s.X-20)/390,(s.Y-35)/550),0.61,1)
-end
-local function show(open)
-    isOpen=open
-    if open then
-        panel.Visible=true
-        panel.BackgroundTransparency=0.6
-        scale.Scale=targetScale()*0.90
-        tween(scale,0.22,{Scale=targetScale()})
-        tween(panel,0.22,{BackgroundTransparency=0})
-    else
-        tween(panel,0.16,{BackgroundTransparency=0.55})
-        task.delay(0.17,function() if alive and not isOpen then panel.Visible=false end end)
-    end
-end
-bind(opener.MouseButton1Click,function() show(not isOpen) end)
-bind(close.MouseButton1Click,function() show(false) end)
-bind(farmBtn.MouseButton1Click,function() send("ToggleFarm") end)
-bind(airBtn.MouseButton1Click,function() send("AirWalk",not state.airWalk) end)
-bind(safeBtn.MouseButton1Click,function() send("AvoidMurderer",not state.avoidMurderer) end)
-bind(resetBtn.MouseButton1Click,function() send("AutoReset",not state.autoReset) end)
-bind(rejoinBtn.MouseButton1Click,function() send("AutoRejoin",not state.autoRejoin) end)
-bind(endBtn.MouseButton1Click,function() send("EndRound") end)
-bind(antiBtn.MouseButton1Click,function() send("AntiFling",not state.antiFling) end)
-bind(afkBtn.MouseButton1Click,function() send("AntiAfk",not state.antiAfk) end)
-bind(noclipBtn.MouseButton1Click,function() send("Noclip",not state.noclip) end)
+    connect(player.CharacterAdded,function()
+        task.defer(function()
+            if not alive then return end
+            updateCharacter()
+            if character then
+                humanoid=character:WaitForChild("Humanoid",8)
+                root=character:WaitForChild("HumanoidRootPart",8)
+            end
+            if not alive then return end
+            nextClip=0;nextScan=0;nextDangerRefresh=0
+            clearCurrentTarget()
+        end)
+    end)
+    connect(player.CharacterRemoving,function()
+        restoreCollision()
+        character=nil;humanoid=nil;root=nil
+        clearCurrentTarget()
+    end)
+    connect(player.Idled,function()
+        if not alive or not settings.antiAfk then return end
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.zero, Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame or CFrame.new())
+        end)
+    end)
 
-local sliderHeld=false
-local activeTouch
-local function sliderUpdate(input)
-    local x=input.Position.X
-    local ratio=math.clamp((x-speedBar.AbsolutePosition.X)/math.max(1,speedBar.AbsoluteSize.X),0,1)
-    send("Speed",math.floor(1+ratio*99+0.5))
-end
-local function startSlider(input)
-    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
-        sliderHeld=true
-        activeTouch=input.UserInputType==Enum.UserInputType.Touch and input or nil
-        sliderUpdate(input)
+    connectClick(farmBtn,function() setFarm(not settings.farm) end)
+    connectClick(avoidBtn,function()
+        settings.avoidMurderer=not settings.avoidMurderer
+        nextScan=0;refresh()
+    end)
+    connectClick(antiBtn,function()
+        settings.antiFling=not settings.antiFling
+        refresh()
+    end)
+    connectClick(afkBtn,function()
+        settings.antiAfk=not settings.antiAfk
+        refresh()
+    end)
+    local function changeSpeed(value)
+        settings.speed=math.clamp(math.floor((tonumber(value) or settings.speed)+0.5),1,100)
+        speedUI()
     end
-end
-bind(speedBar.InputBegan,startSlider)
-bind(speedKnob.InputBegan,startSlider)
-bind(UserInputService.InputChanged,function(input)
-    if sliderHeld and (input.UserInputType==Enum.UserInputType.MouseMovement or (input.UserInputType==Enum.UserInputType.Touch and input==activeTouch)) then
-        sliderUpdate(input)
+    local function sliderChange(input)
+        local fraction=math.clamp((input.Position.X-track.AbsolutePosition.X)/math.max(1,track.AbsoluteSize.X),0,1)
+        changeSpeed(1+99*fraction)
     end
-end)
-bind(UserInputService.InputEnded,function(input)
-    if sliderHeld and (input.UserInputType==Enum.UserInputType.MouseButton1 or (input.UserInputType==Enum.UserInputType.Touch and input==activeTouch)) then
-        sliderHeld=false
-        activeTouch=nil
+    local function sliderStart(input)
+        if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
+            heldSlider=true
+            sliderTouch=input.UserInputType==Enum.UserInputType.Touch and input or nil
+            sliderChange(input)
+        end
     end
-end)
-bind(speedInput.FocusLost,function()
-    send("Speed",math.clamp(tonumber(speedInput.Text) or state.speed,1,100))
-    speedInput.Text=tostring(state.speed)
-end)
+    connect(track.InputBegan,sliderStart)
+    connect(knob.InputBegan,sliderStart)
+    connect(UserInputService.InputChanged,function(input)
+        if heldSlider and (input.UserInputType==Enum.UserInputType.MouseMovement or input==sliderTouch) then
+            sliderChange(input)
+        end
+        if dragging and dragPosition and
+           (input.UserInputType==Enum.UserInputType.MouseMovement or input==dragTouch) then
+            local delta=input.Position-dragPosition
+            panel.Position=UDim2.new(originalPanelPosition.X.Scale,originalPanelPosition.X.Offset+delta.X,
+                originalPanelPosition.Y.Scale,originalPanelPosition.Y.Offset+delta.Y)
+        end
+    end)
+    connect(UserInputService.InputEnded,function(input)
+        if heldSlider and (input.UserInputType==Enum.UserInputType.MouseButton1 or input==sliderTouch) then
+            heldSlider=false;sliderTouch=nil
+        end
+        if dragging and (input.UserInputType==Enum.UserInputType.MouseButton1 or input==dragTouch) then
+            dragging=false;dragTouch=nil
+        end
+    end)
+    connect(speedBox.FocusLost,function()
+        changeSpeed(speedBox.Text)
+        speedBox.Text=tostring(settings.speed)
+    end)
+    connect(header.InputBegan,function(input)
+        if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
+            dragging=true
+            dragTouch=input.UserInputType==Enum.UserInputType.Touch and input or nil
+            dragPosition=input.Position
+            originalPanelPosition=panel.Position
+        end
+    end)
+    local function fitScale()
+        local camera=Workspace.CurrentCamera
+        local screen=camera and camera.ViewportSize or Vector2.new(400,720)
+        scale.Scale=math.clamp(math.min((screen.X-16)/390,(screen.Y-20)/510),0.57,1)
+    end
+    fitScale()
+    connect(Workspace:GetPropertyChangedSignal("CurrentCamera"),fitScale)
+    local open=true
+    local function show(value)
+        open=value
+        panel.Visible=value
+        if value then fitScale() end
+    end
+    connectClick(launcher,function() show(not open) end)
+    connectClick(close,function() show(false) end)
+    connect(UserInputService.InputBegan,function(input,processed)
+        if not processed and input.KeyCode==Enum.KeyCode.RightShift then show(not open) end
+    end)
 
-local dragging=false
-local dragInput=nil
-local dragFrom=nil
-local panelFrom=nil
-bind(header.InputBegan,function(input)
-    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
-        dragging=true
-        dragInput=input.UserInputType==Enum.UserInputType.Touch and input or nil
-        dragFrom=input.Position
-        panelFrom=panel.Position
-    end
-end)
-bind(UserInputService.InputChanged,function(input)
-    if dragging and dragFrom and (input.UserInputType==Enum.UserInputType.MouseMovement or (input.UserInputType==Enum.UserInputType.Touch and input==dragInput)) then
-        local delta=input.Position-dragFrom
-        panel.Position=UDim2.new(panelFrom.X.Scale,panelFrom.X.Offset+delta.X,panelFrom.Y.Scale,panelFrom.Y.Offset+delta.Y)
-    end
-end)
-bind(UserInputService.InputEnded,function(input)
-    if dragging and (input.UserInputType==Enum.UserInputType.MouseButton1 or (input.UserInputType==Enum.UserInputType.Touch and input==dragInput)) then
-        dragging=false;dragInput=nil
-    end
-end)
-bind(UserInputService.InputBegan,function(input,processed)
-    if not processed and input.KeyCode==Enum.KeyCode.RightShift then show(not isOpen) end
-end)
-bind(player.Chatted,function(msg)
-    if string.lower(msg)=="/farm" then show(not isOpen) end
-end)
-pcall(function()
-    local cmd=Instance.new("TextChatCommand")
-    cmd.Name="AtlantaFarmToggleV17"
-    cmd.PrimaryAlias="/farm"
-    cmd.Parent=TextChatService:FindFirstChild("TextChatCommands") or TextChatService
-    bind(cmd.Triggered,function() show(not isOpen) end)
-end)
-
-bind(player.CharacterAdded,function()
-    state.currentTarget=nil
-    state.nearestDistance=0
-    task.wait(0.6)
-    if not alive then return end
-    applySpeed()
-    if resetPending then state.resets+=1;resetPending=false end
-    updateNoclip()
-end)
-applySpeed()
-local lastProtection=0
-bind(RunService.Heartbeat,function(dt)
-    if not alive then return end
-    lastProtection+=dt
-    if lastProtection>0.45 then
-        lastProtection=0
-        if state.antiFling or next(savedOtherCollision)~=nil then updateAntiFling() end
-        if state.noclip or state.visiting then updateNoclip() end
-        if not state.espFault then
-            local ok,err=pcall(updateTargetESP)
-            if not ok then
-                state.espFault=true
-                warn("Hallowen MM2 ESP disabled: "..tostring(err))
+    local t=0
+    connect(RunService.Heartbeat,function(dt)
+        if not alive then return end
+        t=t+math.min(dt,0.1)
+        updateFlight(dt)
+        if t>=nextClip then
+            nextClip=t+0.22
+            if not character or not root or not humanoid or humanoid.Health<=0 then
+                updateCharacter()
+            end
+            updateNoclip()
+        end
+        if t>=nextScan then
+            nextScan=t+0.22
+            if settings.farm and root and humanoid and humanoid.Health>0 and not settings.arrivedAt then
+                local nearest=chooseNearest()
+                if nearest and nearest~=settings.target then
+                    local current=settings.target
+                    local switch=(not current) or (not current.Parent)
+                    if not switch then
+                        local oldDist=(current.Position-root.Position).Magnitude
+                        local newDist=(nearest.Position-root.Position).Magnitude
+                        -- Avoid target jitter; still prefer candies to normal coins.
+                        switch=newDist+3.5<oldDist or (collectibles[nearest]=="candy" and collectibles[current]~="candy")
+                    end
+                    if switch then setCurrentTarget(nearest) end
+                elseif not nearest and not settings.target then
+                    settings.status="Жду появления конфет · Noclip ON"
+                end
             end
         end
-    end
-end)
-bind(player.Idled,function()
-    if not state.antiAfk then return end
-    local camera=Workspace.CurrentCamera
-    local cf=camera and camera.CFrame or CFrame.new()
-    local ok=pcall(function()
-        VirtualUser:CaptureController()
-        VirtualUser:ClickButton2(Vector2.new(0,0),cf)
+        if t>=nextSafety then
+            nextSafety=t+0.65
+            if settings.antiFling and root and root.Parent then
+                local v=root.AssemblyLinearVelocity
+                local planar=Vector3.new(v.X,0,v.Z)
+                if planar.Magnitude>170 then root.AssemblyLinearVelocity=Vector3.zero end
+                if root.AssemblyAngularVelocity.Magnitude>45 then root.AssemblyAngularVelocity=Vector3.zero end
+            end
+        end
+        if t>=nextUi then
+            nextUi=t+0.75
+            refresh()
+        end
     end)
-    state.status=ok and "Anti-AFK: попытка активности отправлена" or "Anti-AFK: среда не разрешает отправку"
+
+    connect(gui.Destroying,function()
+        alive=false
+        settings.farm=false
+        stopFlight()
+        restoreCollision()
+        for _,con in ipairs(connections) do pcall(function() con:Disconnect() end) end
+    end)
+
+    updateNoclip() -- Noclip is enabled immediately without a UI row.
     refresh()
+end, function(message)
+    return tostring(message).."\n"..debug.traceback()
 end)
-
-local lastRejoin=-math.huge
-pcall(function()
-    bind(GuiService.ErrorMessageChanged,function(message)
-        if not alive or not state.autoRejoin or RunService:IsStudio() or type(message)~="string" then return end
-        local m=string.lower(message)
-        if not (m:find("disconnect",1,true) or m:find("connection",1,true) or m:find("соединен",1,true)) then return end
-        if os.clock()-lastRejoin<70 then return end
-        lastRejoin=os.clock()
-        state.status="Пробую переподключиться..."
-        refresh()
-        task.defer(function() pcall(function() TeleportService:Teleport(game.PlaceId,player) end) end)
-    end)
-end)
-
--- Bag statistics are ONLY available when this specific game exposes these attributes.
-task.spawn(function()
-    while alive and gui.Parent do
-        task.wait(1)
-        if not alive then break end
-        local bag=player:GetAttribute("AtlantaBag")
-        local limit=player:GetAttribute("AtlantaBagLimit")
-        state.bag=type(bag)=="number" and bag or "?"
-        state.bagLimit=type(limit)=="number" and limit or "?"
-        state.role=player:GetAttribute("AtlantaRole") or player:GetAttribute("CurrentRole") or player:GetAttribute("Role") or "Unknown"
-        if state.autoReset and state.active and not state.visiting and type(bag)=="number"
-            and type(limit)=="number" and limit>0 and bag>=limit and os.clock()-lastReset>18 then
-            lastReset=os.clock()
-            local _,hum=charParts()
-            if hum then
-                resetPending=true
-                state.status="Полный мешок · перерождение (если разрешено игрой)"
-                hum.Health=0
-            end
-        end
-        refresh()
-    end
-end)
-
-task.spawn(function()
-    while alive and gui.Parent do
-        task.wait(8)
-        if not alive then break end
-        local now=os.clock()
-        for part in pairs(cachedCoins) do
-            if (not part) or (not part.Parent) or (not part:IsDescendantOf(Workspace)) then
-                cachedCoins[part]=nil
-                visited[part]=nil
-            elseif (visited[part] or 0)>0 and now-(visited[part] or 0)>120 then
-                visited[part]=nil
-            end
-        end
-        for part in pairs(savedCollision) do
-            if (not part) or (not part.Parent) then savedCollision[part]=nil end
-        end
-        for part in pairs(savedOtherCollision) do
-            if (not part) or (not part.Parent) then savedOtherCollision[part]=nil end
-        end
-        if state.active and not state.visiting and not charParts() then
-            state.status="Ожидаю новый раунд / персонажа"
-        end
-        refresh()
-    end
-end)
-
-bind(gui.Destroying,function()
-    alive=false;state.active=false;token+=1
-    state.noclip=false;state.antiFling=false
-    updateNoclip();updateAntiFling(true)
-    if targetHighlight then targetHighlight:Destroy() end
-    if targetBillboard then targetBillboard:Destroy() end
-    for _,c in ipairs(listeners) do pcall(function() c:Disconnect() end) end
-end)
-refresh()
-show(true)
-
-end, function(err)
-    return tostring(err)
-end)
-if not __launchOk then
-    warn("HALLOWEN MM2 startup error: "..tostring(__launchError))
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification",{
-            Title="HALLOWEN MM2 - ERROR",
-            Text=tostring(__launchError):sub(1,190),
-            Duration=12
-        })
-    end)
-end
+if not ok then warn("[HALLOWEN MM2 v2.2] Startup error: "..tostring(err)) end
