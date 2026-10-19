@@ -1,128 +1,131 @@
-local Players            = game:GetService("Players")
-local TweenService       = game:GetService("TweenService")
-local UserInputService   = game:GetService("UserInputService")
-local RunService         = game:GetService("RunService")
-local ReplicatedStorage  = game:GetService("ReplicatedStorage")
-local VirtualUser        = game:GetService("VirtualUser")
-
-local LocalPlayer = Players.LocalPlayer
-local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
-
-local cfg = {
-	autoFarm   = false,
-	antiAFK    = true,
-	antiFling  = true,
-	avoidMurderer = true,
-	autoReset  = true,
-	autoEndGame = false, -- experimental physics attempt after an automatic reset
-	farmSpeed  = 30,
-	loopDelay  = 0.18,
-}
-
-local stats = {
-	coins   = 0,
-	started = os.clock(),
-}
-
-local C = {
-	bgTop    = Color3.fromRGB(58, 28, 86),
-	bgBot    = Color3.fromRGB(14, 8, 22),
-	card     = Color3.fromRGB(28, 18, 40),
-	glass    = Color3.fromRGB(46, 30, 66),
-	glassTop = Color3.fromRGB(68, 46, 94),
-	accent   = Color3.fromRGB(255, 118, 20),
-	accent2  = Color3.fromRGB(255, 176, 64),
-	trackOff = Color3.fromRGB(72, 54, 96),
-	ink      = Color3.fromRGB(255, 240, 222),
-	inkSoft  = Color3.fromRGB(178, 152, 204),
-}
-
-local function corner(inst, r)
-	local u = Instance.new("UICorner")
-	u.CornerRadius = UDim.new(0, r or 8)
-	u.Parent = inst
-	return u
-end
-
-local function pad(inst, p)
-	local u = Instance.new("UIPadding")
-	u.PaddingLeft   = UDim.new(0, p)
-	u.PaddingRight  = UDim.new(0, p)
-	u.PaddingTop    = UDim.new(0, p)
-	u.PaddingBottom = UDim.new(0, p)
-	u.Parent = inst
-	return u
-end
-
-local function gradient(inst, c1, c2, rot)
-	local g = Instance.new("UIGradient")
-	g.Color = ColorSequence.new(c1, c2)
-	g.Rotation = rot or 90
-	g.Parent = inst
-	return g
-end
-
-local function stroke(inst, col, thick, trans)
-	local s = Instance.new("UIStroke")
-	s.Color = col
-	s.Thickness = thick or 1
-	s.Transparency = trans or 0
-	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	s.Parent = inst
-	return s
-end
-
-local function addPop(btn, down)
-	local sc = Instance.new("UIScale")
-	sc.Parent = btn
-	local target = down or 0.9
-	local function to(v)
-		TweenService:Create(sc, TweenInfo.new(0.1, Enum.EasingStyle.Quad), { Scale = v }):Play()
+bagCount = 0
+		stats.coins = 0
+        coinStat.Text = "0 / 50"
 	end
-	btn.MouseButton1Down:Connect(function() to(target) end)
-	btn.MouseButton1Up:Connect(function() to(1) end)
-	btn.MouseLeave:Connect(function() to(1) end)
-end
-
-local guiParent = PlayerGui
-do
-	local ok, hui = pcall(function() return gethui and gethui() end)
-	if ok and hui then
-		guiParent = hui
-	else
-		local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
-		if ok2 and cg then guiParent = cg end
-	end
-end
-
-for _, where in ipairs({ guiParent, PlayerGui, game:GetService("CoreGui") }) do
-	pcall(function()
-		for _, name in ipairs({ "HalloweenAutofarm", "SummerAutofarm", "Heatwave", "XHub" }) do
-			local old = where:FindFirstChild(name)
-			if old then old:Destroy() end
+	task.spawn(function()
+		local humanoid = newChar:WaitForChild("Humanoid", 8)
+		local newRoot = newChar:WaitForChild("HumanoidRootPart", 8)
+		if not humanoid or not newRoot then return end
+		modeStat.Text = (newChar.Name:lower():find("zomb") or newChar:GetAttribute("Zombie")) and "Zombie" or "Ready"
+		if wasReset and cfg.autoEndGame and cfg.autoFarm then
+			task.wait(0.8)
+			attemptEndGame()
 		end
 	end)
+end)
+
+-- Some zombie morphs keep the player object but change the model or its name.
+task.spawn(function()
+	while gui.Parent do
+		local c = character()
+		if c then
+			local zombieTag = c.Name:lower():find("zomb") or c:GetAttribute("Zombie")
+			modeStat.Text = zombieTag and "Zombie" or "Ready"
+		end
+		task.wait(2)
+	end
+end)
+
+task.spawn(function()
+    while gui.Parent do
+        local ok, err = pcall(function()
+        if cfg.autoFarm and not resetRequested and not runningFling and liveHumanoid() then
+			local coins = allCoins()
+			-- Coin containers permit mid-round injection and zombie transforms even
+			-- when the original RoundStart client event did not fire again.
+			local canFarm = #coins > 0 and (roundActive or os.clock() - roundEndedAt > 2)
+			if canFarm then
+                local coin, dist = nearestCoin(coins)
+                local hrp = root()
+                if not coin then
+                    targetStat.Text = "No safe candy"
+                    setStatus("Waiting for a safe target", "warn")
+                end
+                if coin and hrp then
+                    targetStat.Text = "Candy"
+                    setStatus("Flying to safe candy", "good")
+                    roundStat.Text = "In game"
+                    local duration = math.clamp(dist / math.max(cfg.farmSpeed, 1), 0.04, 12)
+					local direction = coin.Position - hrp.Position
+					local horizontal = Vector3.new(direction.X, 0, direction.Z)
+					local goal = (horizontal.Magnitude > 0.01)
+						and CFrame.lookAt(coin.Position, coin.Position + horizontal.Unit)
+						or CFrame.new(coin.Position)
+					local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+						CFrame = goal
+					})
+					currentTween = tween
+					tween:Play()
+					local started = os.clock()
+					local oldRoot = hrp
+					while cfg.autoFarm and not resetRequested and not runningFling
+						and root() == oldRoot and coin.Parent and os.clock() - started < duration + 0.5 do
+						if not coin:FindFirstChild("TouchInterest") and (oldRoot.Position - coin.Position).Magnitude < 5 then
+							break
+						end
+						if cfg.avoidMurderer then
+							local mr = murdererRoot()
+							if mr and ((oldRoot.Position - mr.Position).Magnitude < 24
+								or (coin.Position - mr.Position).Magnitude < 35) then
+                                targetStat.Text = "Avoiding killer"
+                                setStatus("Murderer nearby • rerouting", "warn")
+                                break -- immediately retarget to a safer coin cluster
+							end
+						end
+						task.wait(0.045)
+					end
+					if currentTween == tween then
+						stopMove()
+					end
+					if coin.Parent and (coin:FindFirstChild("TouchInterest") or
+						(coin.Position - oldRoot.Position).Magnitude > 4) then
+						-- A target that did not register a pickup must not stall the entire farm.
+						ignoredCoinUntil[coin] = os.clock() + 2.0
+					end
+				end
+            else
+                targetStat.Text = "Waiting"
+            end
+        else
+            targetStat.Text = "Idle"
+        end
+        end)
+        if not ok then
+            pcall(stopMove)
+            warn("[NIGHTSHIFT] Farm recovered from error: " .. tostring(err))
+            setStatus("Farm retry after error", "danger")
+            task.wait(0.5)
+        end
+        task.wait(cfg.loopDelay)
+    end
+end)
+
+
+task.spawn(function()
+    while gui.Parent do
+        local secs = math.floor(os.clock() - stats.started)
+        timeStat.Text = string.format("%dm %ds", math.floor(secs / 60), secs % 60)
+        task.wait(1)
+	end
+end)
+
+-- Clean up service handlers on re-injection. Never leave orphan heartbeat handlers.
+gui.Destroying:Connect(function()
+    pcall(stopMove)
+    pcall(stopFloating)
+    pcall(restoreCollisions)
+    local ch = LocalPlayer.Character
+    local rp = ch and ch:FindFirstChild("HumanoidRootPart")
+    local spin = rp and rp:FindFirstChild("AutoEndGameSpin")
+    if spin then pcall(function() spin:Destroy() end) end
+    for _, conn in ipairs(connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+end)
+print("[NIGHTSHIFT] UI + autofarm initialized successfully (v3.0)")
+
+end -- launch
+local ok, err = pcall(launch)
+if not ok then
+    warn("[NIGHTSHIFT] Startup error: " .. tostring(err))
 end
-
-local gui = Instance.new("ScreenGui")
-gui.Name = "HalloweenAutofarm"
-gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.IgnoreGuiInset = true
-gui.DisplayOrder = 999999
-if not pcall(function() gui.Parent = guiParent end) then
-	gui.Parent = PlayerGui
-end
-
-local WIN_W, WIN_H = 292, 340
-
-local win = Instance.new("Frame")
-win.Name = "Window"
-win.AnchorPoint = Vector2.new(0, 0)
-win.Position = UDim2.new(0.5, -WIN_W / 2, 0.5, -WIN_H / 2)
-win.Size = UDim2.new(0, WIN_W, 0, WIN_H)
-win.BackgroundColor3 = C.card
-win.BorderSizePixel = 0
-win.ZIndex = 2
-win.Active = true
-win.ClipsDescendants = true
