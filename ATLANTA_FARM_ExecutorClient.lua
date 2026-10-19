@@ -1,4 +1,4 @@
--- ATLANTA FARM V1.7 • Halloween Air Walk Edition • @AtlantaRobuxShop
+HALLOWEN MM2 V1.8 • Optimized Candy Farm Edition • @AtlantaRobuxShop
 -- Standalone CLIENT UI for testing within a Roblox experience.
 -- Works only to the extent permitted by the place / local runtime.
 -- Does not claim server-confirmed coin collection, universal End Round or auto-injection after a crash.
@@ -15,16 +15,16 @@ local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
 local VirtualUser = game:GetService("VirtualUser")
 local player = Players.LocalPlayer
-if not player then warn("ATLANTA FARM V1.7 must run on the client") return end
+if not player then warn("HALLOWEN MM2 V1.8 must run on the client") return end
 local pg = player:WaitForChild("PlayerGui")
-local guiName = "ATLANTA_FARM_V17"
+local guiName = "HALLOWEN_MM2_V18"
 local current = pg:FindFirstChild(guiName)
 if current then
     local panel = current:FindFirstChild("MainWindow")
     if panel then panel.Visible = true end
     return
 end
-for _, oldName in ipairs({"ATLANTA_FARM_V16","ATLANTA_FARM_V15","ATLANTA_FARM_V14","ATLANTA_FARM_V13","ATLANTA_FARM_V12","AtlantaFarmNoServerNotice"}) do
+for _, oldName in ipairs({"HALLOWEN_MM2_V18","ATLANTA_FARM_V17","ATLANTA_FARM_V16","ATLANTA_FARM_V15","ATLANTA_FARM_V14","ATLANTA_FARM_V13","ATLANTA_FARM_V12","AtlantaFarmNoServerNotice"}) do
     local old = pg:FindFirstChild(oldName)
     if old then old:Destroy() end
 end
@@ -43,7 +43,8 @@ local state = {
     active = false, speed = 10, antiFling = true, antiAfk = true,
     noclip = false, airWalk = true, avoidMurderer = true, autoReset = false, autoRejoin = false,
     visiting = false, visits = 0, candies = 0, coins = 0, failures = 0, resets = 0,
-    bag = "?", bagLimit = "?", status = "Готово · Air Walk + авто-Noclip", role = "Unknown"
+    bag = "?", bagLimit = "?", status = "Готово · Hallowen MM2 готов", role = "Unknown",
+    currentTarget = nil, nearestDistance = 0
 }
 local alive = true
 local startedAt = os.clock()
@@ -58,6 +59,10 @@ local listeners = {}
 local refresh
 local updateNoclip
 local updateAntiFling
+local targetHighlight
+local targetBillboard
+local lastAntiFlingSweep = 0
+local gui
 
 local function bind(signal, fn)
     local c = signal:Connect(fn)
@@ -239,33 +244,13 @@ end
 -- The player's humanoid remains unanchored. Local server corrections can still occur.
 local function glideToCoin(part,job)
     state.visiting=true
+    state.currentTarget=part
     local arrived=false
     local char,hum,root=charParts()
     if char and part and part.Parent and not unsafeTarget(part.Position) then
         local goal=part.Position+Vector3.new(0,0.7,0)
-        local start=root.Position
-        local flat=Vector3.new(goal.X-start.X,0,goal.Z-start.Z)
-        -- Keep a fixed facing direction for the entire leg to prevent rapid rotation.
-        local facing=(flat.Magnitude>0.1)
-            and CFrame.lookAt(Vector3.zero,flat.Unit).Rotation or root.CFrame.Rotation
         local oldAutoRotate=hum.AutoRotate
         hum.AutoRotate=false
-        -- Optional default walking animation for a walking-in-the-air appearance.
-        -- Some experiences replace Animate; skip animation if not available.
-        local walkTrack=nil
-        pcall(function()
-            local animate=char:FindFirstChild("Animate")
-            local walkFolder=animate and animate:FindFirstChild("walk")
-            local walkAnim=walkFolder and walkFolder:FindFirstChildWhichIsA("Animation")
-            local animator=hum:FindFirstChildOfClass("Animator")
-            if walkAnim and animator then
-                walkTrack=animator:LoadAnimation(walkAnim)
-                walkTrack.Priority=Enum.AnimationPriority.Movement
-                walkTrack.Looped=true
-                walkTrack:Play(0.18)
-                walkTrack:AdjustSpeed(math.clamp(state.speed/16,0.4,2))
-            end
-        end)
         state.status="Air Walk → "..(isCandy(part) and "ближайшая конфета" or "монета")
         while alive and state.active and state.airWalk and job==token do
             char,hum,root=charParts()
@@ -274,6 +259,8 @@ local function glideToCoin(part,job)
                 if root and (root.Position-goal).Magnitude<6 then arrived=true end
                 break
             end
+            goal=part.Position+Vector3.new(0,0.7,0)
+            state.nearestDistance=math.floor((goal-root.Position).Magnitude+0.5)
             if unsafeTarget(goal) or unsafeTarget(root.Position) then
                 state.status="Murderer рядом · меняю цель"
                 break
@@ -292,18 +279,23 @@ local function glideToCoin(part,job)
                 state.status="Murderer на маршруте · меняю цель"
                 break
             end
-            -- Disable local part collisions while crossing obstacles. A server can override this.
             updateNoclip()
-            root.CFrame=CFrame.new(nextPos)*facing
+            local flat=Vector3.new(vector.X,0,vector.Z)
+            if flat.Magnitude>0.05 then
+                root.CFrame=CFrame.lookAt(nextPos,nextPos+flat.Unit)
+            else
+                root.CFrame=CFrame.new(nextPos)*root.CFrame.Rotation
+            end
             root.AssemblyLinearVelocity=Vector3.zero
             root.AssemblyAngularVelocity=Vector3.zero
         end
-        if walkTrack then pcall(function() walkTrack:Stop(0.16);walkTrack:Destroy() end) end
         if hum and hum.Parent then hum.AutoRotate=oldAutoRotate end
     elseif part and part.Parent then
         state.status="Murderer рядом с конфетой · пропускаю"
     end
     state.visiting=false
+    state.currentTarget=nil
+    state.nearestDistance=0
     updateNoclip()
     if arrived then
         state.visits+=1
@@ -320,6 +312,7 @@ end
 
 local function walkToCoin(part,job)
     state.visiting=true
+    state.currentTarget=part
     local arrived=false
     for attempt=1,3 do
         if not alive or not state.active or job~=token or not part or not part.Parent then break end
@@ -330,6 +323,7 @@ local function walkToCoin(part,job)
             break
         end
         local goal=groundGoal(part,char)
+        state.nearestDistance=math.floor((goal-root.Position).Magnitude+0.5)
         local route=routeTo(char,root,goal)
         if not route then
             state.status="Нет безопасного пешего маршрута к монете"
@@ -353,6 +347,8 @@ local function walkToCoin(part,job)
         task.wait(0.15)
     end
     state.visiting=false
+    state.currentTarget=nil
+    state.nearestDistance=0
     if arrived then
         state.visits+=1
         if isCandy(part) then state.candies+=1 else state.coins+=1 end
@@ -372,15 +368,17 @@ local function farmLoop(job)
             state.status="Ожидаю персонажа"
             task.wait(0.5)
         else
-            local coin,n,hasThreat=chooseCoin(root)
+            local coin,n,hasThreat,preferCandy,eligibleCandies=chooseCoin(root)
             if coin then
                 if state.airWalk then glideToCoin(coin,job) else walkToCoin(coin,job) end
                 task.wait(0.13)
             else
                 if n==0 then
-                    state.status="Монеты не найдены в Workspace"
+                    state.status="Конфеты и монеты не найдены в Workspace"
+                elseif eligibleCandies and eligibleCandies>0 then
+                    state.status="Жду ближайшую безопасную конфету"
                 elseif hasThreat then
-                    state.status="Жду монету подальше от Murderer"
+                    state.status="Жду цель подальше от Murderer"
                 else
                     state.status="Нет доступных целей"
                 end
@@ -412,18 +410,24 @@ updateNoclip=function()
         end
     end
 end
-updateAntiFling=function()
-    -- Local physics mitigation: cannot cancel server-authoritative impulses.
-    for _,other in ipairs(Players:GetPlayers()) do
-        if other~=player and other.Character then
-            for _,part in ipairs(other.Character:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    if state.antiFling then
-                        if savedOtherCollision[part]==nil then savedOtherCollision[part]=part.CanCollide end
-                        part.CanCollide=false
-                    elseif savedOtherCollision[part]~=nil then
-                        part.CanCollide=savedOtherCollision[part]
-                        savedOtherCollision[part]=nil
+updateAntiFling=function(force)
+    -- Optimized sweep: avoid scanning every character each frame.
+    local now=os.clock()
+    if force or state.antiFling or next(savedOtherCollision)~=nil then
+        if force or now-lastAntiFlingSweep>1.1 then
+            lastAntiFlingSweep=now
+            for _,other in ipairs(Players:GetPlayers()) do
+                if other~=player and other.Character then
+                    for _,part in ipairs(other.Character:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            if state.antiFling then
+                                if savedOtherCollision[part]==nil then savedOtherCollision[part]=part.CanCollide end
+                                part.CanCollide=false
+                            elseif savedOtherCollision[part]~=nil then
+                                part.CanCollide=savedOtherCollision[part]
+                                savedOtherCollision[part]=nil
+                            end
+                        end
                     end
                 end
             end
@@ -450,7 +454,7 @@ local function send(action,value)
         state.active=not state.active
         token+=1
         if state.active then
-            state.status=state.airWalk and "Air Walk: ищу ближайшую конфету" or "Ищу пеший маршрут"
+            state.status=state.airWalk and "Air Walk: лечу к ближайшей конфете" or "Ищу пеший маршрут"
             local job=token
             task.spawn(function() farmLoop(job) end)
         else
@@ -459,14 +463,14 @@ local function send(action,value)
     elseif action=="AirWalk" then
         state.airWalk=not not value
         token+=1
-        state.status=state.airWalk and "Air Walk ON · по прямой" or "Air Walk OFF · пеший маршрут"
+        state.status=state.airWalk and "Air Walk ON · плавный полёт к ближайшей цели" or "Air Walk OFF · пеший маршрут"
         if state.active then
             local job=token
             task.spawn(function() farmLoop(job) end)
         end
     elseif action=="AntiFling" then
         state.antiFling=not not value
-        updateAntiFling()
+        updateAntiFling(true)
         state.status=state.antiFling and "Anti-Fling ON · локальная защита" or "Anti-Fling OFF"
     elseif action=="AntiAfk" then
         state.antiAfk=not not value
@@ -474,7 +478,7 @@ local function send(action,value)
     elseif action=="Noclip" then
         state.noclip=not not value
         updateNoclip()
-        state.status=state.noclip and "Noclip ON · сквозь стены (локально)" or "Noclip OFF · стены могут остановить Air Walk"
+        state.status=state.noclip and "Noclip ON · ручной режим" or "Noclip OFF · Air Walk включает его только во время движения"
     elseif action=="AvoidMurderer" then
         state.avoidMurderer=not not value
         state.status="Avoid Murderer "..(state.avoidMurderer and "ON" or "OFF")
@@ -513,6 +517,61 @@ local function tween(obj,time,goal)
     t:Play()
     return t
 end
+local function updateTargetESP()
+    if not targetHighlight then
+        targetHighlight=Instance.new("Highlight")
+        targetHighlight.Name="HalloweenMM2TargetESP"
+        targetHighlight.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+        targetHighlight.FillColor=ORANGE
+        targetHighlight.OutlineColor=PURPLE
+        targetHighlight.FillTransparency=0.2
+        targetHighlight.OutlineTransparency=0
+        targetHighlight.Enabled=false
+        targetHighlight.Parent=Workspace
+    end
+    if not targetBillboard then
+        targetBillboard=Instance.new("BillboardGui")
+        targetBillboard.Name="HalloweenMM2TargetLabel"
+        targetBillboard.Size=UDim2.fromOffset(150,34)
+        targetBillboard.StudsOffset=Vector3.new(0,2.8,0)
+        targetBillboard.AlwaysOnTop=true
+        targetBillboard.Enabled=false
+        targetBillboard.Parent=gui
+        local bg=Instance.new("Frame")
+        bg.Name="BG"
+        bg.Size=UDim2.fromScale(1,1)
+        bg.BackgroundColor3=BG
+        bg.BackgroundTransparency=0.18
+        bg.BorderSizePixel=0
+        bg.Parent=targetBillboard
+        round(bg,8)
+        border(bg,ORANGE,0.15)
+        local lbl=Instance.new("TextLabel")
+        lbl.Name="Text"
+        lbl.BackgroundTransparency=1
+        lbl.Size=UDim2.new(1,-8,1,-4)
+        lbl.Position=UDim2.fromOffset(4,2)
+        lbl.Font=Enum.Font.GothamBold
+        lbl.TextColor3=LIGHT
+        lbl.TextScaled=true
+        lbl.Text="TARGET"
+        lbl.Parent=bg
+    end
+    local target=state.currentTarget
+    if target and target.Parent and target:IsA("BasePart") then
+        targetHighlight.Adornee=target
+        targetHighlight.Enabled=true
+        targetBillboard.Adornee=target
+        targetBillboard.Enabled=true
+        local lbl=targetBillboard.BG.Text
+        lbl.Text=(isCandy(target) and "🎃 NEAREST CANDY" or "COIN").." · "..tostring(state.nearestDistance or 0).."m"
+    else
+        targetHighlight.Enabled=false
+        targetHighlight.Adornee=nil
+        targetBillboard.Enabled=false
+        targetBillboard.Adornee=nil
+    end
+end
 local function text(parent,s,x,y,w,h,size,color,bold)
     return ui("TextLabel",{
         BackgroundTransparency=1,Text=s,Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,
@@ -538,9 +597,9 @@ local function card(parent,h)
     border(item,PURPLE,0.9)
     return item
 end
-local gui=ui("ScreenGui",{Name=guiName,ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=60},pg)
+gui=ui("ScreenGui",{Name=guiName,ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=60},pg)
 local opener=ui("TextButton",{
-    Name="AtlantaLauncher",Text="A",Font=Enum.Font.GothamBlack,TextSize=23,TextColor3=LIGHT,
+    Name="HalloweenLauncher",Text="🎃",Font=Enum.Font.GothamBlack,TextSize=23,TextColor3=LIGHT,
     BackgroundColor3=Color3.fromRGB(91,55,83),BorderSizePixel=0,
     Size=UDim2.fromOffset(54,54),Position=UDim2.new(0,16,0.48,0),AutoButtonColor=false,
 },gui)
@@ -548,7 +607,7 @@ round(opener,16)
 border(opener,ORANGE,0.2)
 local panel=ui("Frame",{
     Name="MainWindow",BackgroundColor3=BG,BorderSizePixel=0,ClipsDescendants=true,
-    Size=UDim2.fromOffset(370,530),AnchorPoint=Vector2.new(0.5,0.5),
+    Size=UDim2.fromOffset(372,534),AnchorPoint=Vector2.new(0.5,0.5),
     Position=UDim2.fromScale(0.5,0.5),Visible=false,
 },gui)
 round(panel,16)
@@ -556,10 +615,11 @@ border(panel,ORANGE,0.40)
 local scale=ui("UIScale",{Scale=1},panel)
 local strip=ui("Frame",{BackgroundColor3=ORANGE,BorderSizePixel=0,Size=UDim2.new(1,0,0,3)},panel)
 local header=ui("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,72),Active=true},panel)
-text(header,"✦",14,15,-342,31,25,ORANGE,true).Size=UDim2.fromOffset(30,30)
-text(header,"ATLANTA FARM",44,13,-96,26,18,LIGHT,true)
-text(header,"HALLOWEEN  •  @AtlantaRobuxShop",16,44,-32,17,10,ORANGE,false)
-local close=button(header,"—",-45,20,32,29)
+text(header,"🎃",14,12,-330,34,24,ORANGE,true).Size=UDim2.fromOffset(30,30)
+text(header,"HALLOWEN MM2",46,11,-120,28,19,LIGHT,true)
+text(header,"TELEGRAM  •  @AtlantaRobuxShop",46,42,-100,18,10,ORANGE,false)
+text(header,"✈",-88,13,-16,28,18,PURPLE,true).TextXAlignment=Enum.TextXAlignment.Right
+local close=button(header,"✕",-44,17,30,30)
 local tabs=ui("Frame",{BackgroundTransparency=1,Position=UDim2.fromOffset(12,74),Size=UDim2.new(1,-24,0,38)},panel)
 local tabNames={"ФАРМ","ЗАЩИТА","СТАТИСТИКА"}
 local tabButtons={}
@@ -567,7 +627,7 @@ local pages={}
 for i,name in ipairs(tabNames) do
     local b=ui("TextButton",{
         BackgroundColor3=(i==1 and Color3.fromRGB(79,50,60) or CARD),BorderSizePixel=0,
-        Position=UDim2.new((i-1)/3,3,0,0),Size=UDim2.new(1/3,-6,1,-1),
+        Position=UDim2.new((i-1)/3,4,0,0),Size=UDim2.new(1/3,-8,1,0),
         Text=name,TextSize=11,Font=Enum.Font.GothamBold,
         TextColor3=(i==1 and ORANGE or MUTED),AutoButtonColor=false,
     },tabs)
@@ -575,7 +635,7 @@ for i,name in ipairs(tabNames) do
     tabButtons[i]=b
     local page=ui("ScrollingFrame",{
         Name="Page"..i,BackgroundTransparency=1,BorderSizePixel=0,
-        Position=UDim2.fromOffset(9,117),Size=UDim2.new(1,-14,1,-153),
+        Position=UDim2.fromOffset(10,118),Size=UDim2.new(1,-20,1,-156),
         ScrollBarThickness=3,ScrollBarImageColor3=ORANGE,
         AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.new(),
         ScrollingDirection=Enum.ScrollingDirection.Y,Visible=(i==1),
@@ -595,8 +655,8 @@ local function showTab(idx)
 end
 for i,b in ipairs(tabButtons) do bind(b.MouseButton1Click,function() showTab(i) end) end
 local foot=ui("TextLabel",{
-    BackgroundTransparency=1,Text="ATLANTA FARM V1.7  •  @AtlantaRobuxShop",Font=Enum.Font.Gotham,
-    TextSize=10,TextColor3=MUTED,Position=UDim2.new(0,12,1,-28),Size=UDim2.new(1,-24,0,24)
+    BackgroundTransparency=1,Text="🎃 TELEGRAM  •  @AtlantaRobuxShop  •  ✈",Font=Enum.Font.GothamBold,
+    TextSize=10,TextColor3=MUTED,Position=UDim2.new(0,12,1,-30),Size=UDim2.new(1,-24,0,24)
 },panel)
 
 -- Farm page: no fake flight speed control. Character speed is EXACTLY 1..100.
@@ -606,7 +666,7 @@ text(farmCard,"Ближайшие конфеты → затем монеты",12
 local farmBtn=button(farmCard,"OFF",-77,19,64,32)
 local airRow=card(pages[1],65)
 text(airRow,"AIR WALK",12,6,-93,24,13,LIGHT,true)
-text(airRow,"Ровно по прямой через стены при Noclip",12,31,-82,20,10,MUTED)
+text(airRow,"Плавный полёт к ближайшей конфете с поворотом",12,31,-82,20,10,MUTED)
 local airBtn=button(airRow,"ON",-77,15,64,32)
 local speedCard=card(pages[1],132)
 text(speedCard,"СКОРОСТЬ ПЕРСОНАЖА",12,6,-110,24,12,LIGHT,true)
@@ -665,8 +725,8 @@ text(noclipCard,"Здесь — ручной Noclip вне фарма (риск 
 local noclipBtn=button(noclipCard,"OFF",-77,20,64,33)
 local tips=card(pages[2],80)
 text(tips,"ЗАЩИТА ОТ ЗАСТРЕВАНИЯ",12,6,-24,24,12,LIGHT,true)
-text(tips,"Air Walk: ровный прямой маршрут без рывков.",12,31,-24,19,11,MUTED)
-text(tips,"Обычный бег: обход стен через PathfindingService.",12,51,-24,19,10,MUTED)
+text(tips,"Air Walk: плавный полёт к ближайшей цели без бега.",12,31,-24,19,11,MUTED)
+text(tips,"ESP показывает текущую ближайшую цель.",12,51,-24,19,10,MUTED)
 
 -- Statistics tab: client visits are NOT server-confirmed money.
 local statRow=card(pages[3],150)
@@ -717,6 +777,7 @@ refresh=function()
     bagValue.Text="Мешок: "..tostring(state.bag).." / "..tostring(state.bagLimit)
     roleValue.Text="Роль: "..tostring(state.role)
     statusText.Text=tostring(state.status)
+    updateTargetESP()
 end
 
 -- Smooth responsive opening, with a small clickable launcher on mobile.
@@ -832,10 +893,11 @@ local lastProtection=0
 bind(RunService.Heartbeat,function(dt)
     if not alive then return end
     lastProtection+=dt
-    if lastProtection>0.32 then
+    if lastProtection>0.45 then
         lastProtection=0
-        updateAntiFling()
-        updateNoclip()
+        if state.antiFling or next(savedOtherCollision)~=nil then updateAntiFling() end
+        if state.noclip or state.visiting then updateNoclip() end
+        updateTargetESP()
     end
 end)
 bind(player.Idled,function()
@@ -888,10 +950,38 @@ task.spawn(function()
     end
 end)
 
+task.spawn(function()
+    while alive and gui.Parent do
+        task.wait(8)
+        if not alive then break end
+        local now=os.clock()
+        for part in pairs(cachedCoins) do
+            if (not part) or (not part.Parent) or (not part:IsDescendantOf(Workspace)) then
+                cachedCoins[part]=nil
+                visited[part]=nil
+            elseif (visited[part] or 0)>0 and now-(visited[part] or 0)>120 then
+                visited[part]=nil
+            end
+        end
+        for part in pairs(savedCollision) do
+            if (not part) or (not part.Parent) then savedCollision[part]=nil end
+        end
+        for part in pairs(savedOtherCollision) do
+            if (not part) or (not part.Parent) then savedOtherCollision[part]=nil end
+        end
+        if state.active and not state.visiting and not charParts() then
+            state.status="Ожидаю новый раунд / персонажа"
+        end
+        refresh()
+    end
+end)
+
 bind(gui.Destroying,function()
     alive=false;state.active=false;token+=1
     state.noclip=false;state.antiFling=false
-    updateNoclip();updateAntiFling()
+    updateNoclip();updateAntiFling(true)
+    if targetHighlight then targetHighlight:Destroy() end
+    if targetBillboard then targetBillboard:Destroy() end
     for _,c in ipairs(listeners) do pcall(function() c:Disconnect() end) end
 end)
 refresh()
