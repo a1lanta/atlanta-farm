@@ -1,10 +1,9 @@
--- HALLOWEN MM2 v2.4 - installer + launcher.
--- Saves a standalone local client script if the executor provides file APIs.
--- No remote fetches, no external source execution.
-local CORE = [==[-- HALLOWEN MM2 v2.4 / nearest real pickup, ground safe flight, stable jump
+-- HALLOWEN MM2 v2.4.1 / direct client hotfix (no installer/loadstring)
 -- Self-contained. No remote loadstring or external dependencies.
 -- Movement and pickups remain subject to Roblox/server validation.
 
+-- Runs directly as Luau. The executor should compile this file itself.
+warn("[HALLOWEN MM2 v2.4.1] Direct script started")
 local ok, err = xpcall(function()
     local Players = game:GetService("Players")
     local Workspace = game:GetService("Workspace")
@@ -21,11 +20,11 @@ local ok, err = xpcall(function()
     local player = Players.LocalPlayer
     if not player then return end
     local playerGui = player:WaitForChild("PlayerGui")
-    local guiName = "HALLOWEN_MM2_OPTIMIZED_V24"
+    local guiName = "HALLOWEN_MM2_OPTIMIZED_V24_FIXED"
 
     -- Running the script again safely removes earlier windows and their listeners.
     for _,name in ipairs({
-        guiName, "HALLOWEN_MM2_OPTIMIZED_V23", "HALLOWEN_MM2_OPTIMIZED_V22", "HALLOWEN_MM2_OPTIMIZED_V21", "HALLOWEN_MM2_OPTIMIZED_V20", "HALLOWEN_MM2_V19", "HALLOWEN_MM2_V18",
+        guiName, "HALLOWEN_MM2_OPTIMIZED_V24", "HALLOWEN_MM2_OPTIMIZED_V23", "HALLOWEN_MM2_OPTIMIZED_V22", "HALLOWEN_MM2_OPTIMIZED_V21", "HALLOWEN_MM2_OPTIMIZED_V20", "HALLOWEN_MM2_V19", "HALLOWEN_MM2_V18",
         "ATLANTA_FARM_V17", "ATLANTA_FARM_V16", "ATLANTA_FARM_V15"
     }) do
         local old = playerGui:FindFirstChild(name)
@@ -1054,12 +1053,61 @@ local ok, err = xpcall(function()
     if settings.farm then nextScan=0;queueReload() end
     refresh()
 end, function(message)
-    return tostring(message).."\n"..debug.traceback()
+    local detail=tostring(message)
+    pcall(function()
+        if debug and type(debug.traceback)=="function" then
+            detail=detail.."\n"..tostring(debug.traceback())
+        end
+    end)
+    return detail
 end)
-if not ok then warn("[HALLOWEN MM2 v2.4] Startup error: "..tostring(err)) end
-]==]
-if type(writefile)=="function" then
-    pcall(function() writefile("HALLOWEN_MM2_Optimized_v24.lua",CORE) end)
+if not ok then
+    local description=tostring(err)
+    warn("[HALLOWEN MM2 v2.4.1] STARTUP ERROR: "..description)
+    -- Show the error on-screen for mobile executors that hide the console.
+    pcall(function()
+        local plr=game:GetService("Players").LocalPlayer
+        local pg=plr and plr:WaitForChild("PlayerGui",5)
+        if not pg then return end
+        local old=pg:FindFirstChild("HALLOWEN_MM2_ERROR")
+        if old then old:Destroy() end
+        local gui=Instance.new("ScreenGui")
+        gui.Name="HALLOWEN_MM2_ERROR"
+        gui.ResetOnSpawn=false
+        gui.DisplayOrder=999
+        gui.Parent=pg
+        local card=Instance.new("Frame")
+        card.Name="ErrorWindow"
+        card.BackgroundColor3=Color3.fromRGB(25,20,30)
+        card.AnchorPoint=Vector2.new(0.5,0.5)
+        card.Position=UDim2.fromScale(0.5,0.45)
+        card.Size=UDim2.new(0.86,0,0,180)
+        card.Parent=gui
+        local corner=Instance.new("UICorner")
+        corner.CornerRadius=UDim.new(0,12)
+        corner.Parent=card
+        local txt=Instance.new("TextLabel")
+        txt.BackgroundTransparency=1
+        txt.Size=UDim2.new(1,-24,1,-50)
+        txt.Position=UDim2.fromOffset(12,8)
+        txt.Font=Enum.Font.Gotham
+        txt.TextSize=13
+        txt.TextColor3=Color3.fromRGB(255,220,210)
+        txt.TextXAlignment=Enum.TextXAlignment.Left
+        txt.TextYAlignment=Enum.TextYAlignment.Top
+        txt.TextWrapped=true
+        txt.Text="HALLOWEN MM2 - ошибка запуска:\n"..description
+        txt.Parent=card
+        local close=Instance.new("TextButton")
+        close.Size=UDim2.new(1,-24,0,30)
+        close.Position=UDim2.new(0,12,1,-38)
+        close.Text="Закрыть"
+        close.TextSize=13
+        close.TextColor3=Color3.new(1,1,1)
+        close.BackgroundColor3=Color3.fromRGB(70,49,58)
+        close.Parent=card
+        close.MouseButton1Click:Connect(function() gui:Destroy() end)
+    end)
+else
+    warn("[HALLOWEN MM2 v2.4.1] UI initialized")
 end
-local run=loadstring(CORE)
-if run then run() else warn("[HALLOWEN MM2 v2.4] Failed to compile client") 
