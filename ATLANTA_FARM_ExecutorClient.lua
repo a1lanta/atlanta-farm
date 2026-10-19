@@ -1,4 +1,7 @@
--- HALLOWEN MM2 v2.2 / fast proximity pickup + always-on Noclip
+-- HALLOWEN MM2 v2.3 - installer + launcher.
+-- Saves this version to executor filesystem if writefile exists.
+-- Queues local reload on supported teleports; no external URLs used.
+local CORE = [==[-- HALLOWEN MM2 v2.3 / nearest real pickup, ground safe flight, stable jump
 -- Self-contained. No remote loadstring or external dependencies.
 -- Movement and pickups remain subject to Roblox/server validation.
 
@@ -10,15 +13,19 @@ local ok, err = xpcall(function()
     local TweenService = game:GetService("TweenService")
     local CollectionService = game:GetService("CollectionService")
     local VirtualUser = game:GetService("VirtualUser")
+    local GuiService = game:GetService("GuiService")
+    local TeleportService = game:GetService("TeleportService")
+    local HttpService = game:GetService("HttpService")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
     local player = Players.LocalPlayer
     if not player then return end
     local playerGui = player:WaitForChild("PlayerGui")
-    local guiName = "HALLOWEN_MM2_OPTIMIZED_V22"
+    local guiName = "HALLOWEN_MM2_OPTIMIZED_V23"
 
     -- Running the script again safely removes earlier windows and their listeners.
     for _,name in ipairs({
-        guiName, "HALLOWEN_MM2_OPTIMIZED_V21", "HALLOWEN_MM2_OPTIMIZED_V20", "HALLOWEN_MM2_V19", "HALLOWEN_MM2_V18",
+        guiName, "HALLOWEN_MM2_OPTIMIZED_V22", "HALLOWEN_MM2_OPTIMIZED_V21", "HALLOWEN_MM2_OPTIMIZED_V20", "HALLOWEN_MM2_V19", "HALLOWEN_MM2_V18",
         "ATLANTA_FARM_V17", "ATLANTA_FARM_V16", "ATLANTA_FARM_V15"
     }) do
         local old = playerGui:FindFirstChild(name)
@@ -44,11 +51,11 @@ local ok, err = xpcall(function()
         red=Color3.fromRGB(255,122,122)
     }
     local settings = {
-        farm=false, speed=40, noclip=true,
+        farm=false, speed=25, noclip=true, autoRejoin=true,
         antiAfk=true, antiFling=true, avoidMurderer=true,
         visits=0, candies=0, coins=0, failures=0, disappearances=0,
         target=nil, arrivedAt=nil, lastDistance=math.huge, lastProgressAt=0,
-        status="Готово · Noclip ON · фарм выключен"
+        status="Готово · Noclip AUTO · скорость 25"
     }
     local alive = true
     local started = os.clock()
@@ -57,7 +64,11 @@ local ok, err = xpcall(function()
     local visited = setmetatable({}, {__mode="k"})
     local originalCollision = setmetatable({}, {__mode="k"})
     local character, humanoid, root
-    local hoverAttachment, hoverForce
+    local savedAutoRotate, savedJumpEnabled
+    local floatAttachment,floatForce
+    local autoRejoinCooldown = -math.huge
+    local escapeGoal, escapeStarted = nil, 0
+    local retryAfter = setmetatable({}, {__mode="k"})
     local nextScan, nextClip, nextUi, nextSafety = 0,0,0,0
     local gui
     local refresh
@@ -156,10 +167,11 @@ local ok, err = xpcall(function()
     radius(panel,16)
     stroke(panel,C.orange,0.38)
     local scale=make("UIScale",panel,{Scale=1})
-    make("Frame",panel,{
-        BorderSizePixel=0,BackgroundColor3=C.orange,
-        Size=UDim2.new(1,0,0,3)
+    local topStripe=make("Frame",panel,{
+        Name="InsetTopStripe",BorderSizePixel=0,BackgroundColor3=C.orange,
+        Position=UDim2.fromOffset(11,1),Size=UDim2.new(1,-22,0,2)
     })
+    radius(topStripe,2)
     local header=make("Frame",panel,{
         BackgroundTransparency=1,Size=UDim2.new(1,0,0,69),Active=true
     })
@@ -172,9 +184,18 @@ local ok, err = xpcall(function()
     local telegram=label(header,"✈ TELEGRAM  @AtlantaRobuxShop",10,C.orange,true)
     telegram.Position=UDim2.fromOffset(49,39)
     telegram.Size=UDim2.new(1,-110,0,18)
-    local close=primaryButton(header,"✕",UDim2.fromOffset(31,31))
-    close.Position=UDim2.new(1,-43,0,18)
-    close.TextSize=18
+    local close=primaryButton(header,"",UDim2.fromOffset(32,32))
+    close.Name="CloseCross"
+    close.Position=UDim2.new(1,-45,0,17)
+    close.BackgroundColor3=C.elevated
+    for _,angle in ipairs({45,-45}) do
+        local line=make("Frame",close,{
+            Name="CrossLine",BorderSizePixel=0,BackgroundColor3=C.white,
+            AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),
+            Size=UDim2.fromOffset(18,2),Rotation=angle
+        })
+        radius(line,2)
+    end
 
     local tabs=make("Frame",panel,{
         BackgroundTransparency=1,Size=UDim2.new(1,-24,0,36),
@@ -217,18 +238,18 @@ local ok, err = xpcall(function()
     end
     showTab(1)
 
-    local footer=label(panel,"✈ TELEGRAM  •  @AtlantaRobuxShop  •  v2.2",10,C.muted,true)
+    local footer=label(panel,"✈ TELEGRAM  •  @AtlantaRobuxShop  •  v2.3",10,C.muted,true)
     footer.TextXAlignment=Enum.TextXAlignment.Center
     footer.Position=UDim2.new(0,10,1,-30)
     footer.Size=UDim2.new(1,-20,0,23)
 
-    local farmRow,farmBtn=settingRow(pages[1],"AUTO CANDY FARM","Ближайшая конфета → затем монеты")
+    local farmRow,farmBtn=settingRow(pages[1],"AUTO CANDY FARM","Ближайшие предметы из CoinContainer")
     local speedCard=card(pages[1],115)
     local speedTitle=label(speedCard,"СКОРОСТЬ ПОЛЁТА",12,C.white,true)
     speedTitle.Position=UDim2.fromOffset(13,7)
     speedTitle.Size=UDim2.new(1,-100,0,23)
     local speedBox=make("TextBox",speedCard,{
-        Text="40",TextSize=14,Font=Enum.Font.GothamBold,
+        Text="25",TextSize=14,Font=Enum.Font.GothamBold,
         TextColor3=C.orange,BackgroundColor3=C.elevated,
         ClearTextOnFocus=false,BorderSizePixel=0,
         Size=UDim2.fromOffset(55,28),Position=UDim2.new(1,-68,0,7)
@@ -240,13 +261,13 @@ local ok, err = xpcall(function()
     })
     radius(track,4)
     local fill=make("Frame",track,{
-        BorderSizePixel=0,BackgroundColor3=C.orange,Size=UDim2.fromScale(39/99,1)
+        BorderSizePixel=0,BackgroundColor3=C.orange,Size=UDim2.fromScale(24/99,1)
     })
     radius(fill,4)
     local knob=make("Frame",track,{
         BorderSizePixel=0,BackgroundColor3=C.white,Active=true,
         AnchorPoint=Vector2.new(0.5,0.5),Size=UDim2.fromOffset(18,18),
-        Position=UDim2.fromScale(39/99,0.5)
+        Position=UDim2.fromScale(24/99,0.5)
     })
     radius(knob,9)
     local speedSub=label(speedCard,"1  —  медленно                 100  —  быстро",10,C.muted)
@@ -263,6 +284,7 @@ local ok, err = xpcall(function()
 
     local antiRow,antiBtn=settingRow(pages[2],"ANTI-FLING","Ограничение резких толчков")
     local afkRow,afkBtn=settingRow(pages[2],"ANTI-AFK","Попытка активности при простое")
+    local rejoinRow,rejoinBtn=settingRow(pages[2],"AUTO REJOIN","Попытка при потере связи (не после любого кика)")
     local statsCard=card(pages[3],185)
     local statsTitle=label(statsCard,"СТАТИСТИКА СЕССИИ",13,C.orange,true)
     statsTitle.Position=UDim2.fromOffset(13,9)
@@ -284,6 +306,51 @@ local ok, err = xpcall(function()
     statusText.Position=UDim2.fromOffset(13,28)
     statusText.Size=UDim2.new(1,-26,0,59)
 
+    -- Optional executor file API: persists settings between client restarts if supported.
+    -- Rejoin and reinjection are NOT guaranteed after a full kick / process shutdown.
+    local CONFIG_FILE="HALLOWEN_MM2_settings_v23.json"
+    local SCRIPT_FILE="HALLOWEN_MM2_Optimized_v23.lua"
+    local function saveConfig()
+        local data={farm=settings.farm,speed=settings.speed,antiAfk=settings.antiAfk,
+            antiFling=settings.antiFling,avoidMurderer=settings.avoidMurderer,
+            autoRejoin=settings.autoRejoin}
+        pcall(function()
+            if type(getgenv)=="function" then getgenv().HALLOWEN_MM2_CONFIG=data end
+        end)
+        if type(writefile)=="function" then
+            pcall(function() writefile(CONFIG_FILE,HttpService:JSONEncode(data)) end)
+        end
+    end
+    local function loadConfig()
+        local data=nil
+        if type(readfile)=="function" then
+            pcall(function() data=HttpService:JSONDecode(readfile(CONFIG_FILE)) end)
+        end
+        if type(data)~="table" then
+            pcall(function() if type(getgenv)=="function" then data=getgenv().HALLOWEN_MM2_CONFIG end end)
+        end
+        if type(data)~="table" then return end
+        for _,k in ipairs({"farm","antiAfk","antiFling","avoidMurderer","autoRejoin"}) do
+            if type(data[k])=="boolean" then settings[k]=data[k] end
+        end
+        if type(data.speed)=="number" then settings.speed=math.clamp(math.floor(data.speed+0.5),1,100) end
+    end
+    loadConfig()
+    -- Loader is queued only when the user has placed this standalone Lua file
+    -- into their executor filesystem under SCRIPT_FILE.
+    local function queueReload()
+        local q=nil
+        pcall(function()
+            if type(queue_on_teleport)=="function" then q=queue_on_teleport end
+            if not q and type(syn)=="table" then q=syn.queue_on_teleport end
+        end)
+        if type(q)~="function" then return false end
+        local canReload=false
+        pcall(function() canReload=type(isfile)=="function" and isfile(SCRIPT_FILE) end)
+        if not canReload then return false end
+        local snippet='local ok,data=pcall(function() return readfile("'..SCRIPT_FILE..'") end); if ok and type(data)=="string" then local fn=loadstring(data); if fn then fn() end end'
+        return pcall(function() q(snippet) end)
+    end
     local function speedUI()
         local amount=math.clamp(settings.speed,1,100)
         local ratio=(amount-1)/99
@@ -297,136 +364,178 @@ local ok, err = xpcall(function()
         setToggleText(avoidBtn,settings.avoidMurderer)
         setToggleText(antiBtn,settings.antiFling)
         setToggleText(afkBtn,settings.antiAfk)
+        setToggleText(rejoinBtn,settings.autoRejoin)
         speedUI()
         statsLines[1].Text="Подлётов к целям: "..settings.visits
         statsLines[2].Text="Целей исчезло рядом: "..settings.disappearances
-        statsLines[3].Text="Из них конфеты: "..settings.candies
-        statsLines[4].Text="Из них монеты: "..settings.coins
+        statsLines[3].Text="Исчезли рядом (вероятный сбор): "..settings.candies
+        statsLines[4].Text="Ошибки маршрута: "..settings.failures
         local seconds=math.floor(os.clock()-started)
         statsLines[5].Text=string.format("Время: %02d:%02d:%02d",math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
         statusText.Text=settings.status
     end
 
-    local function classify(part)
-        if not part or not part:IsA("BasePart") or not part.Parent then return nil end
-        if part==root or (character and part:IsDescendantOf(character)) then return nil end
-        if CollectionService:HasTag(part,"AtlantaCoin") or
-           CollectionService:HasTag(part,"Candy") or part:GetAttribute("AtlantaCoin")==true then
-            return "candy"
+    -- MM2 spawns active pickups below CoinContainer, typically with TouchInterest.
+    -- Unlike name scans, this ignores random scenery/coins in unrelated folders.
+    local function inCoinContainer(part)
+        local ancestor=part and part.Parent
+        for _=1,6 do
+            if not ancestor or ancestor==Workspace then break end
+            if ancestor.Name=="CoinContainer" then return true end
+            ancestor=ancestor.Parent
         end
-        if CollectionService:HasTag(part,"Coin") then return "coin" end
-        local node=part
-        for _=1,4 do
-            if not node or node==Workspace then break end
-            local n=string.lower(node.Name)
-            if n:find("candy",1,true) or n:find("конфет",1,true)
-                or n=="green" or n=="purple" or n=="cyan" then
-                return "candy"
-            end
-            if n:find("coin",1,true) or n:find("монет",1,true) then
-                return "coin"
-            end
-            node=node.Parent
-        end
-        return nil
+        return false
+    end
+    local function isPickup(part)
+        return part and part:IsA("BasePart") and part:IsDescendantOf(Workspace)
+            and inCoinContainer(part) and part:FindFirstChild("TouchInterest")~=nil
     end
     local function addPart(obj)
-        if not alive or not obj:IsA("BasePart") then return end
-        local kind=classify(obj)
-        if kind then collectibles[obj]=kind end
+        if not alive then return end
+        if obj:IsA("BasePart") then
+            if isPickup(obj) then collectibles[obj]=true end
+        elseif obj.Name=="TouchInterest" and obj.Parent and obj.Parent:IsA("BasePart") then
+            local part=obj.Parent
+            if inCoinContainer(part) then collectibles[part]=true end
+        end
     end
-    -- Initial scan is spread across frames to avoid freezing the game on a large map.
     task.spawn(function()
+        -- Initial scan is bounded to one pass and yields to avoid frame stalls.
         local all=Workspace:GetDescendants()
         for i,obj in ipairs(all) do
-            if not alive then break end
+            if not alive then return end
             addPart(obj)
-            if i%350==0 then task.wait() end
+            if i%450==0 then task.wait() end
         end
         all=nil
     end)
     connect(Workspace.DescendantAdded,addPart)
-    for _,tag in ipairs({"AtlantaCoin","Candy","Coin"}) do
-        connect(CollectionService:GetInstanceAddedSignal(tag),addPart)
-    end
-    -- Remove deleted parts promptly; weak tables then allow garbage collection.
     connect(Workspace.DescendantRemoving,function(obj)
-        if not alive then return end
-        if settings.target==obj then
-            -- Disappearance near the player is a pickup *indicator*, not server proof.
-            if root and collectibles[obj] and (root.Position-obj.Position).Magnitude<3.6 then
-                settings.disappearances=settings.disappearances+1
-                if collectibles[obj]=="candy" then settings.candies=settings.candies+1
-                else settings.coins=settings.coins+1 end
-                settings.status="Цель исчезла рядом · ищу следующую · Noclip ON"
+        if collectibles[obj] then
+            if settings.target==obj and root and root.Parent and
+                (root.Position-obj.Position).Magnitude<5 then
+                settings.disappearances+=1
+                settings.candies+=1 -- pickup indication only, not confirmed award
             end
-            settings.target=nil
-            settings.arrivedAt=nil
-            settings.lastDistance=math.huge
-            nextScan=0
+            collectibles[obj]=nil
+            retryAfter[obj]=nil
+            visited[obj]=nil
+            if settings.target==obj then
+                settings.target=nil
+                settings.arrivedAt=nil
+                nextScan=0
+            end
+        elseif obj.Name=="TouchInterest" and obj.Parent and collectibles[obj.Parent] then
+            local part=obj.Parent
+            collectibles[part]=nil
+            if settings.target==part and root and root.Parent and
+                (root.Position-part.Position).Magnitude<5 then
+                settings.disappearances+=1
+                settings.candies+=1
+            end
+            if settings.target==part then
+                settings.target=nil
+                settings.arrivedAt=nil
+                nextScan=0
+            end
         end
-        if collectibles[obj] then collectibles[obj]=nil;visited[obj]=nil end
     end)
+
+    local roundKnown=false
+    local roundActive=true
+    local gameplay=ReplicatedStorage:FindFirstChild("Remotes")
+    gameplay=gameplay and gameplay:FindFirstChild("Gameplay")
+    if gameplay then
+        local startEv=gameplay:FindFirstChild("RoundStart")
+        local endEv=gameplay:FindFirstChild("RoundEndFade")
+        if startEv and startEv:IsA("RemoteEvent") then
+            connect(startEv.OnClientEvent,function() roundKnown=true;roundActive=true;nextScan=0 end)
+        end
+        if endEv and endEv:IsA("RemoteEvent") then
+            connect(endEv.OnClientEvent,function()
+                roundKnown=true;roundActive=false;settings.target=nil;settings.arrivedAt=nil
+                escapeGoal=nil;nextScan=0
+            end)
+        end
+    end
 
     local function updateCharacter()
         character=player.Character
         humanoid=character and character:FindFirstChildOfClass("Humanoid") or nil
         root=character and character:FindFirstChild("HumanoidRootPart") or nil
-        hoverForce=nil
-        hoverAttachment=nil
-        if character then
-            for part in pairs(originalCollision) do
-                if not part:IsDescendantOf(character) then originalCollision[part]=nil end
-            end
+        savedAutoRotate=nil
+        savedJumpEnabled=nil
+        floatAttachment=nil
+        floatForce=nil
+        for part in pairs(originalCollision) do
+            if not character or not part:IsDescendantOf(character) then originalCollision[part]=nil end
         end
     end
     updateCharacter()
-
-    local function ensureHover()
+    local function flightMode(on)
+        if not humanoid or not humanoid.Parent then return end
+        if on then
+            if savedAutoRotate==nil then savedAutoRotate=humanoid.AutoRotate end
+            if savedJumpEnabled==nil then
+                savedJumpEnabled=humanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping)
+            end
+            humanoid.AutoRotate=false
+            -- Prevent jumping impulse while automatic movement owns character position.
+            humanoid.Jump=false
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,false)
+            if humanoid:GetState()~=Enum.HumanoidStateType.Physics then
+                humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+            end
+        else
+            if savedAutoRotate~=nil then humanoid.AutoRotate=savedAutoRotate end
+            if savedJumpEnabled~=nil then
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,savedJumpEnabled)
+            end
+            if humanoid.Health>0 and savedJumpEnabled~=nil then
+                humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+            savedAutoRotate=nil
+            savedJumpEnabled=nil
+        end
+    end
+    local function ensureFlightSupport()
+        -- Counter gravity only while farming. Unlike v2.2, this never affects normal jumping.
         if not root or not root.Parent then return end
-        if hoverAttachment and hoverAttachment.Parent~=root then hoverAttachment=nil;hoverForce=nil end
-        if not hoverAttachment then
-            hoverAttachment=make("Attachment",root,{Name="HalloweenFloatAttachment"})
-            hoverForce=make("VectorForce",root,{
-                Name="HalloweenAntiGravity",Attachment0=hoverAttachment,
-                RelativeTo=Enum.ActuatorRelativeTo.World,
-                ApplyAtCenterOfMass=true
+        if floatAttachment and floatAttachment.Parent~=root then
+            floatAttachment=nil;floatForce=nil
+        end
+        if not floatAttachment then
+            floatAttachment=make("Attachment",root,{Name="HallowenFlightPoint"})
+            floatForce=make("VectorForce",root,{
+                Name="HallowenFlightLift",Attachment0=floatAttachment,
+                RelativeTo=Enum.ActuatorRelativeTo.World,ApplyAtCenterOfMass=true
             })
         end
-        -- Counteracting gravity prevents continuous fall while Noclip is always ON.
-        hoverForce.Force=Vector3.new(0,root.AssemblyMass*Workspace.Gravity,0)
-        if not settings.farm then
-            -- Avoid drifting vertically after a flight is switched off.
-            local vel=root.AssemblyLinearVelocity
-            if math.abs(vel.Y)>3 then
-                root.AssemblyLinearVelocity=Vector3.new(vel.X,math.clamp(vel.Y,-3,3),vel.Z)
-            end
+        if floatForce then
+            floatForce.Force=Vector3.new(0,root.AssemblyMass*Workspace.Gravity,0)
         end
     end
     local function updateNoclip()
-        if not character or not character.Parent then return end
+        -- Noclip is automatic ONLY during flight; normal jump works when farm is off.
+        if not character or not character.Parent or not settings.farm or
+            not root or not humanoid or humanoid.Health<=0 or (roundKnown and not roundActive) then return end
         for _,obj in ipairs(character:GetDescendants()) do
             if obj:IsA("BasePart") then
                 if originalCollision[obj]==nil then originalCollision[obj]=obj.CanCollide end
                 if obj.CanCollide then obj.CanCollide=false end
-                -- Restore normal visibility after older script versions.
-                -- Do not reveal the naturally invisible HumanoidRootPart or hidden parts.
-                if obj.Name~="HumanoidRootPart" and obj.Transparency<1
-                    and obj.LocalTransparencyModifier~=0 then
-                    obj.LocalTransparencyModifier=0
-                end
+                -- No LocalTransparencyModifier modifications: character stays visible.
             end
         end
-        ensureHover()
     end
     local function restoreCollision()
         for part,val in pairs(originalCollision) do
             if part and part.Parent then pcall(function() part.CanCollide=val end) end
             originalCollision[part]=nil
         end
-        if hoverAttachment then hoverAttachment:Destroy() end
-        if hoverForce then hoverForce:Destroy() end
-        hoverAttachment=nil;hoverForce=nil
+        flightMode(false)
+        if floatForce then pcall(function() floatForce:Destroy() end) end
+        if floatAttachment then pcall(function() floatAttachment:Destroy() end) end
+        floatForce=nil;floatAttachment=nil
     end
 
     local dangerPositions={}
@@ -465,36 +574,24 @@ local ok, err = xpcall(function()
         end
         return false
     end
+    -- Keep away from Murderer while preferring the nearest *actual pickup*,
+    -- not a random part or a faraway coin promoted by name.
     local function chooseNearest()
         if not root then return nil end
-        -- Threat lookup runs at most once every 0.6 sec; not on each target scan.
-        if os.clock()>=nextDangerRefresh then
-            nextDangerRefresh=os.clock()+0.60
-            collectDanger()
-        end
         local origin=root.Position
-        local bestCandy,bestCoin
-        local candyD,coinD=math.huge,math.huge
+        local best,bestDist=nil,math.huge
         local now=os.clock()
-        for part,kind in pairs(collectibles) do
-            if part.Parent and now-(visited[part] or -999)>4 then
-                local difference=part.Position-origin
-                local sq=difference:Dot(difference)
-                if sq<550*550 and not nearDanger(part.Position,27) then
-                    if kind=="candy" and sq<candyD then
-                        candyD=sq;bestCandy=part
-                    elseif kind=="coin" and sq<coinD then
-                        coinD=sq;bestCoin=part
-                    end
-                end
-            elseif not part.Parent then
-                collectibles[part]=nil
-                visited[part]=nil
+        for part in pairs(collectibles) do
+            if not isPickup(part) then
+                collectibles[part]=nil;retryAfter[part]=nil
+            elseif now>=(retryAfter[part] or 0) and not nearDanger(part.Position,34) then
+                local d=part.Position-origin
+                local sq=d:Dot(d)
+                if sq<500*500 and sq<bestDist then best=part;bestDist=sq end
             end
         end
-        return bestCandy or bestCoin
+        return best
     end
-
     local function clearCurrentTarget()
         settings.target=nil
         settings.arrivedAt=nil
@@ -506,41 +603,42 @@ local ok, err = xpcall(function()
         settings.arrivedAt=nil
         settings.lastDistance=math.huge
         settings.lastProgressAt=os.clock()
-        settings.status=collectibles[target]=="candy" and
-            "Лечу к ближайшей конфете · Noclip ON" or "Лечу к ближайшей монете · Noclip ON"
+        settings.status="Лечу к ближайшей конфете · Noclip ON"
     end
     local function stopFlight()
-        if humanoid and humanoid.Parent then humanoid.AutoRotate=true end
         clearCurrentTarget()
+        escapeGoal=nil
+        restoreCollision()
         if root and root.Parent then
             root.AssemblyLinearVelocity=Vector3.zero
             root.AssemblyAngularVelocity=Vector3.zero
         end
     end
     setFarm=function(value)
-        settings.farm=not not value
+        local nextValue=not not value
+        if settings.farm==nextValue then return end
+        settings.farm=nextValue
         if not settings.farm then
             stopFlight()
-            settings.status="Фарм выключен · Noclip ON"
+            settings.status="Фарм выключен · прыжок обычный"
         else
             settings.status="Ищу ближайшую конфету · Noclip ON"
             nextScan=0
         end
+        saveConfig()
         refresh()
     end
     local function finishTarget(target, succeeded)
         if target then
-            -- Failure gets a short delay. Completed (touched) targets get longer delay
-            -- so the character will seek new items instead of circling one decoration.
-            visited[target]=os.clock()-(succeeded and 0 or 2)
-            if not succeeded then settings.failures=settings.failures+1 end
+            -- Longer cool-down if the server left the target in place.
+            retryAfter[target]=os.clock()+(succeeded and 7 or 3)
+            if not succeeded then settings.failures+=1 end
         end
         clearCurrentTarget()
-        if succeeded then
-            settings.status="Контакт с целью · ищу следующую · Noclip ON"
-        end
+        if succeeded then settings.status="Контакт с целью · ищу следующую · Noclip ON" end
         nextScan=0
     end
+
     -- Some executors expose firetouchinterest. Optional only: do not depend on it.
     -- Never call unknown game remotes or execute external code.
     local lastTouchAttempt=0
@@ -555,65 +653,122 @@ local ok, err = xpcall(function()
             end)
         end
     end
-    local function updateFlight(dt)
-        if not settings.farm then return end
-        if not character or not humanoid or not root or humanoid.Health<=0 then
-            clearCurrentTarget()
-            settings.status="Ожидаю нового раунда · Noclip ON"
-            return
+    local floorParams=RaycastParams.new()
+    floorParams.FilterType=Enum.RaycastFilterType.Exclude
+    floorParams.RespectCanCollide=true
+    local lastFloor, lastFloorAt=nil,0
+    local function safeHeight(point, target)
+        local now=os.clock()
+        if now-lastFloorAt>0.12 then
+            floorParams.FilterDescendantsInstances=target and {character,target} or {character}
+            -- Cast from the desired position to detect floors near that route segment.
+            lastFloor=Workspace:Raycast(point+Vector3.new(0,4,0),Vector3.new(0,-82,0),floorParams)
+            lastFloorAt=now
         end
-        local target=settings.target
-        if not target then return end
-        if not target.Parent or not target:IsDescendantOf(Workspace) then
-            -- The removal event can already have counted this disappearance.
-            finishTarget(target,true)
-            return
-        end
-        if nearDanger(target.Position,25) or nearDanger(root.Position,15) then
-            settings.status="Murderer рядом · меняю цель · Noclip ON"
-            finishTarget(target,false)
-            return
-        end
-        -- Fly into the actual part, rather than stopping 2.8 studs away.
-        -- This increases the chance of the game's Touched / proximity logic firing.
-        local goal=target.Position+Vector3.new(0,0.14,0)
-        local vector=goal-root.Position
-        local distance=vector.Magnitude
-        if distance<=0.72 then
-            if not settings.arrivedAt then
-                settings.arrivedAt=os.clock()
-                settings.visits=settings.visits+1
-                settings.status=collectibles[target]=="candy" and
-                    "Касаюсь конфеты · Noclip ON" or "Касаюсь монеты · Noclip ON"
-            end
-            tryClientTouch(target)
-            -- Stay briefly at the part so collision / pickup scripts can react.
-            if os.clock()-settings.arrivedAt>=0.27 then
-                finishTarget(target,true)
-            end
-            return
-        end
-        -- Detect repeated server corrections that make the player appear stuck.
-        if distance < settings.lastDistance-0.24 then
-            settings.lastDistance=distance
-            settings.lastProgressAt=os.clock()
-        elseif os.clock()-settings.lastProgressAt>1.6 then
-            settings.status="Не могу приблизиться · меняю цель · Noclip ON"
-            finishTarget(target,false)
-            return
-        end
-        local delta=math.max(0.001,math.min(dt,0.05))
-        local move=math.min(distance,settings.speed*delta)
-        local nextPosition=root.Position+vector.Unit*move
-        local flat=Vector3.new(vector.X,0,vector.Z)
-        humanoid.AutoRotate=false
-        if flat.Magnitude>0.08 then
-            root.CFrame=CFrame.lookAt(nextPosition,nextPosition+flat.Unit)
+        if lastFloor then return math.max(point.Y,lastFloor.Position.Y+2.65) end
+        -- If no floor detected, do not dive rapidly into unbounded lower space.
+        return math.max(point.Y,root and root.Position.Y-1 or point.Y)
+    end
+    local function moveStep(dest,dt)
+        if not root or not root.Parent then return end
+        local start=root.Position
+        local vec=dest-start
+        local dist=vec.Magnitude
+        if dist<0.025 then return end
+        local step=math.min(dist,settings.speed*math.clamp(dt,0.001,0.05))
+        local pos=start+vec.Unit*step
+        pos=Vector3.new(pos.X,safeHeight(pos,settings.target),pos.Z)
+        local flat=Vector3.new(vec.X,0,vec.Z)
+        if flat.Magnitude>0.04 then
+            root.CFrame=CFrame.lookAt(pos,pos+flat.Unit)
         else
-            root.CFrame=CFrame.new(nextPosition)*root.CFrame.Rotation
+            root.CFrame=CFrame.new(pos)*root.CFrame.Rotation
         end
         root.AssemblyLinearVelocity=Vector3.zero
         root.AssemblyAngularVelocity=Vector3.zero
+    end
+    local function closestThreat(point)
+        local nearest,dist=nil,math.huge
+        for _,pos in ipairs(dangerPositions) do
+            local dx=point.X-pos.X;local dz=point.Z-pos.Z
+            local d=dx*dx+dz*dz
+            if d<dist then nearest=pos;dist=d end
+        end
+        return nearest,math.sqrt(dist)
+    end
+    local function dodgeMurderer(murderer)
+        local here=root.Position
+        local away=Vector3.new(here.X-murderer.X,0,here.Z-murderer.Z)
+        if away.Magnitude<0.5 then away=root.CFrame.LookVector end
+        away=Vector3.new(away.X,0,away.Z).Unit
+        -- Move far sideways, try a *small* descent, never below walkable floor.
+        local retreat=here+away*43+Vector3.new(0,-4,0)
+        escapeGoal=Vector3.new(retreat.X,safeHeight(retreat,nil),retreat.Z)
+        escapeStarted=os.clock()
+        clearCurrentTarget()
+        settings.status="Murderer рядом · отлетаю вниз и в сторону · Noclip ON"
+    end
+    local function updateFlight(dt)
+        if not settings.farm then return end
+        if not character or not humanoid or not root or humanoid.Health<=0 then
+            clearCurrentTarget();settings.status="Жду нового персонажа"
+            return
+        end
+        if roundKnown and not roundActive then
+            if savedJumpEnabled~=nil or next(originalCollision)~=nil then restoreCollision() end
+            settings.status="Раунд закончился · жду следующий"
+            return
+        end
+        flightMode(true)
+        ensureFlightSupport()
+        if os.clock()>=nextDangerRefresh then
+            nextDangerRefresh=os.clock()+0.3
+            collectDanger()
+        end
+        local threat,dist=closestThreat(root.Position)
+        if settings.avoidMurderer and threat and dist<33 and not escapeGoal then
+            dodgeMurderer(threat)
+        end
+        if escapeGoal then
+            if (root.Position-escapeGoal).Magnitude<2.1 or os.clock()-escapeStarted>3 then
+                escapeGoal=nil;nextScan=0
+                settings.status="Ушёл от Murderer · ищу другую конфету"
+            else
+                moveStep(escapeGoal,dt)
+                return
+            end
+        end
+        local target=settings.target
+        if not target then return end
+        if not isPickup(target) then finishTarget(target,false);return end
+        if nearDanger(target.Position,34) then
+            finishTarget(target,false)
+            settings.status="Конфета рядом с Murderer · пропускаю"
+            return
+        end
+        -- Follow item at stable floor-safe height, not under the map.
+        local goal=target.Position
+        goal=Vector3.new(goal.X,safeHeight(goal,target),goal.Z)
+        local d=(goal-root.Position).Magnitude
+        if d<=1.0 then
+            if not settings.arrivedAt then
+                settings.arrivedAt=os.clock()
+                settings.visits+=1
+                settings.status="Касаюсь конфеты · Noclip ON"
+            end
+            tryClientTouch(target)
+            -- Don't wait forever for server pickup; timeout and try other targets.
+            if os.clock()-settings.arrivedAt>=0.28 then finishTarget(target,true) end
+            return
+        end
+        if d<settings.lastDistance-0.07 then
+            settings.lastDistance=d;settings.lastProgressAt=os.clock()
+        elseif os.clock()-settings.lastProgressAt>1.3 then
+            settings.status="Застревание · перестраиваю цель · Noclip ON"
+            finishTarget(target,false)
+            return
+        end
+        moveStep(goal,dt)
     end
 
     connect(player.CharacterAdded,function()
@@ -626,6 +781,7 @@ local ok, err = xpcall(function()
             end
             if not alive then return end
             nextClip=0;nextScan=0;nextDangerRefresh=0
+            escapeGoal=nil
             clearCurrentTarget()
         end)
     end)
@@ -642,22 +798,60 @@ local ok, err = xpcall(function()
         end)
     end)
 
+    pcall(function()
+        connect(GuiService.ErrorMessageChanged,function(message)
+            if not alive or not settings.autoRejoin or type(message)~="string" then return end
+            local m=string.lower(message)
+            if not (m:find("disconnect",1,true) or m:find("connection",1,true)
+                or m:find("соединен",1,true) or m:find("kick",1,true)) then return end
+            if os.clock()-autoRejoinCooldown<65 or RunService:IsStudio() then return end
+            autoRejoinCooldown=os.clock()
+            saveConfig()
+            queueReload()
+            settings.status="Пробую перезайти (если Roblox разрешит)"
+            task.defer(function()
+                pcall(function() TeleportService:Teleport(game.PlaceId,player) end)
+            end)
+        end)
+    end)
+    pcall(function()
+        connect(player.OnTeleport,function(state)
+            if state==Enum.TeleportState.Started then
+                saveConfig()
+                if settings.autoRejoin then queueReload() end
+            end
+        end)
+    end)
+
     connectClick(farmBtn,function() setFarm(not settings.farm) end)
     connectClick(avoidBtn,function()
         settings.avoidMurderer=not settings.avoidMurderer
-        nextScan=0;refresh()
+        nextScan=0;saveConfig();refresh()
     end)
     connectClick(antiBtn,function()
         settings.antiFling=not settings.antiFling
-        refresh()
+        saveConfig();refresh()
     end)
     connectClick(afkBtn,function()
         settings.antiAfk=not settings.antiAfk
-        refresh()
+        saveConfig();refresh()
     end)
+    connectClick(rejoinBtn,function()
+        settings.autoRejoin=not settings.autoRejoin
+        saveConfig();refresh()
+        if settings.autoRejoin then queueReload() end
+    end)
+    local speedSaveQueued=false
     local function changeSpeed(value)
         settings.speed=math.clamp(math.floor((tonumber(value) or settings.speed)+0.5),1,100)
         speedUI()
+        if not speedSaveQueued then
+            speedSaveQueued=true
+            task.delay(0.7,function()
+                speedSaveQueued=false
+                if alive then saveConfig() end
+            end)
+        end
     end
     local function sliderChange(input)
         local fraction=math.clamp((input.Position.X-track.AbsolutePosition.X)/math.max(1,track.AbsoluteSize.X),0,1)
@@ -725,50 +919,37 @@ local ok, err = xpcall(function()
     local t=0
     connect(RunService.Heartbeat,function(dt)
         if not alive then return end
-        t=t+math.min(dt,0.1)
-        updateFlight(dt)
+        t+=math.min(dt,0.1)
+        if settings.farm then updateFlight(dt) end
         if t>=nextClip then
-            nextClip=t+0.22
+            nextClip=t+0.2
             if not character or not root or not humanoid or humanoid.Health<=0 then
                 updateCharacter()
             end
-            updateNoclip()
+            if settings.farm and (not roundKnown or roundActive) then updateNoclip() end
         end
         if t>=nextScan then
-            nextScan=t+0.22
-            if settings.farm and root and humanoid and humanoid.Health>0 and not settings.arrivedAt then
+            nextScan=t+0.18
+            if settings.farm and root and humanoid and humanoid.Health>0
+                and not settings.target and not escapeGoal and (not roundKnown or roundActive) then
                 local nearest=chooseNearest()
-                if nearest and nearest~=settings.target then
-                    local current=settings.target
-                    local switch=(not current) or (not current.Parent)
-                    if not switch then
-                        local oldDist=(current.Position-root.Position).Magnitude
-                        local newDist=(nearest.Position-root.Position).Magnitude
-                        -- Avoid target jitter; still prefer candies to normal coins.
-                        switch=newDist+3.5<oldDist or (collectibles[nearest]=="candy" and collectibles[current]~="candy")
-                    end
-                    if switch then setCurrentTarget(nearest) end
-                elseif not nearest and not settings.target then
-                    settings.status="Жду появления конфет · Noclip ON"
-                end
+                if nearest then setCurrentTarget(nearest)
+                else settings.status="Жду появления предметов CoinContainer · Noclip ON" end
             end
         end
         if t>=nextSafety then
             nextSafety=t+0.65
-            if settings.antiFling and root and root.Parent then
+            if settings.antiFling and root and root.Parent and not settings.farm then
                 local v=root.AssemblyLinearVelocity
-                local planar=Vector3.new(v.X,0,v.Z)
-                if planar.Magnitude>170 then root.AssemblyLinearVelocity=Vector3.zero end
+                if v.Magnitude>170 then root.AssemblyLinearVelocity=Vector3.zero end
                 if root.AssemblyAngularVelocity.Magnitude>45 then root.AssemblyAngularVelocity=Vector3.zero end
             end
         end
-        if t>=nextUi then
-            nextUi=t+0.75
-            refresh()
-        end
+        if t>=nextUi then nextUi=t+0.75;refresh() end
     end)
 
     connect(gui.Destroying,function()
+        saveConfig()
         alive=false
         settings.farm=false
         stopFlight()
@@ -776,9 +957,17 @@ local ok, err = xpcall(function()
         for _,con in ipairs(connections) do pcall(function() con:Disconnect() end) end
     end)
 
-    updateNoclip() -- Noclip is enabled immediately without a UI row.
+    -- Noclip switches on automatically while farming; when idle jump is normal.
+    if settings.farm then nextScan=0;queueReload() end
     refresh()
 end, function(message)
     return tostring(message).."\n"..debug.traceback()
 end)
-if not ok then warn("[HALLOWEN MM2 v2.2] Startup error: "..tostring(err)) end
+if not ok then warn("[HALLOWEN MM2 v2.3] Startup error: "..tostring(err)) end
+]==]
+if type(writefile)=="function" then
+    pcall(function() writefile("HALLOWEN_MM2_Optimized_v23.lua", CORE) end)
+end
+local executable, parseError = loadstring(CORE)
+if executable then executable()
+else warn("[HALLOWEN MM2 v2.3] Load error: "..tostring(parseError)) end
